@@ -132,11 +132,8 @@ int main(int argc, char *argv[])
     // 初始化全局并发内存池，用于节点分配、哈希表等
     auto pool = std::make_shared<ConcurrentMemoryPool>(memory_limit * 1024ULL * 1024ULL * 1024ULL, n_thread);
 
-    // 初始化高频 k-mer 的全局计数哈希表
-    auto hash_table = std::make_shared<ConcurrentMap<N1>>(pool.get(), kmer_concurrent_hash_map_capacity);
-
     // 初始化 k-mer 字典树(KmerTree)的核心结构，整合前述多个组件
-    auto tree = std::make_shared<KmerTree<N1>>(k_len, pool.get(), layer_queues.get(), hash_table.get(), export_ring_pool.get());
+    auto tree = std::make_shared<KmerTree<N1>>(k_len, pool.get(), layer_queues.get(), export_ring_pool.get());
 
     // 初始化并构建 Tasker 线程池，负责消费层级队列并将 k-mer 路由到深层节点 / 哈希表
     auto task_thread_pool = std::make_shared<SchedulerThreadPool<N1>>(tasker_num, parser_num, tree.get(), layer_queues.get());
@@ -188,8 +185,6 @@ int main(int argc, char *argv[])
     export_writer->join();
 
     std::cout << "Total read k-mer count: " << parser_thread_pool->get_total_read_kmer() << std::endl;
-    std::cout << "Map size: " << hash_table->size() << std::endl;
-    std::cout << "Global k-mer count: " << hash_table->size() + sorted_kmer_count.load(std::memory_order_relaxed) << std::endl;
 
     const auto final_end = std::chrono::steady_clock::now();
 

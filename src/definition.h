@@ -20,7 +20,7 @@ constexpr uint64_t PAGE_SIZE = 4096;
 
 constexpr uint64_t BASES_PER_U64T = 32;
 constexpr uint64_t KMER_BLOCK_SIZE = 4096; // 单个小 k-mer 块大小
-inline constexpr uint32_t MAX_KMER_BLOCK_NUM = 21 - 5; // 单个节点能挂载的最大 k-mer 块数量
+inline constexpr uint32_t MAX_KMER_BLOCK_NUM = 16; // 单个节点能挂载的最大 k-mer 块数量
 
 // 树的结构参数
 constexpr uint32_t NODE_BASES = 2; // 普通节点的字典基数 (即碱基数, 2^(2*2) = 16 叉树)
@@ -143,9 +143,9 @@ struct KmerBatch
 };
 
 template <uint32_t N>
-struct ExportBlock
+struct alignas(PAGE_SIZE) ExportBlock
 {
-    std::array<kmer<N>, EXPORT_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)> k_mers;
+    std::array<kmer<N>, PAGE_SIZE / sizeof(kmer<N>)> k_mers;
 };
 
 // 写入k-mer计数

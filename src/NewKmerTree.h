@@ -100,8 +100,8 @@ public:
     std::array<ConcurrentDoubleBloomFilter<N> *, 1ULL << (2 * ROOT_BASES)> root_bloom_filters{};
 
     // 构造函数：初始化字典树相关组件
-    explicit KmerTree(uint32_t k_len, ConcurrentMemoryPool *in_memory_pool, LayerQueues<N> *in_layer_queue, ConcurrentMap<N> *hash_table, RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY> *in_export_ring_pool)
-        : k_length(k_len), layer_queue_(in_layer_queue), global_hash_table(hash_table), memory_pool(in_memory_pool), export_ring_pool(in_export_ring_pool)
+    explicit KmerTree(uint32_t k_len, ConcurrentMemoryPool *in_memory_pool, LayerQueues<N> *in_layer_queue, RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY> *in_export_ring_pool)
+        : k_length(k_len), layer_queue_(in_layer_queue), memory_pool(in_memory_pool), export_ring_pool(in_export_ring_pool)
     {
         root_nodes = new node<N>[1ULL << (2 * ROOT_BASES)]();
 
@@ -866,6 +866,7 @@ private:
 
     void insert_kmer_in_task_to_hash_map(const Task<N> &current_task)
     {
+        ConcurrentCountingHashMap<N> *hash_map = ensure_hash_map(current_task.current_node);
         for (uint64_t block_index = 0; block_index < current_task.count; ++block_index)
         {
             kmer_block<N> *input_kmer_block = current_task.kmer_blocks[block_index];
@@ -874,14 +875,7 @@ private:
             {
                 const kmer<N> &val = input_kmer_block->k_mers[i];
 
-                bool successfully_add_to_local = thread_local_hash_table.increment(val);
-                if (!successfully_add_to_local) [[unlikely]]
-                {
-                    thread_local_hash_table.for_each([this](const kmer<N> &key, const uint32_t &value)
-                                                     { global_hash_table->increment(key, value); });
-                    thread_local_hash_table.clear();
-                    thread_local_hash_table.increment(val);
-                }
+                hash_map->increment(val);
             }
             memory_pool->deallocate(input_kmer_block);
         }
