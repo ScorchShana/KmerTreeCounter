@@ -167,6 +167,7 @@ int main(int argc, char *argv[])
 
     parser.parse_and_push();
     ring_pool->producer_finished(); // 显式标记 Parser 的生产者角色完成，通知 Tasker 和 Exporter 不再有新数据
+    parser_thread_pool->add_total_read_kmer(parser.get_total_read_kmer());
 
     // 阻塞等待 Parser 线程将所有文件块解析并生成 k-mer 完成
     parser_thread_pool->join();

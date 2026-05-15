@@ -69,6 +69,11 @@ public:
         return total_read_kmer.load(std::memory_order_acquire);
     }
 
+    inline void add_total_read_kmer(uint64_t count) noexcept
+    {
+        total_read_kmer.fetch_add(count, std::memory_order_acq_rel);
+    }
+
 private:
     int k;
     KmerTree<N> *tree_ = nullptr;
