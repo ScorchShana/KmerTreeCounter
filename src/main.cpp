@@ -126,7 +126,7 @@ int main(int argc, char *argv[])
     // 初始化层级队列，用于在树的不同深度间传递任务
     auto layer_queues = std::make_shared<LayerQueues<N1>>();
     // 初始化解析器环形内存池，管理 Parser 解析后的 k-mer 数据块
-    auto ring_pool = std::make_shared<RingMemoryPool<RING_MEMORY_POOL_CAPACITY>>(RING_MEMORY_POOL_BLOCK_SIZE, 1, parser_num);
+    auto ring_pool = std::make_shared<RingMemoryPool<RING_MEMORY_POOL_CAPACITY>>(RING_MEMORY_POOL_BLOCK_SIZE, 1, parser_num + 1);
     // 初始化导出用的环形内存池，管理低频 k-mer 的导出数据块
     auto export_ring_pool = std::make_shared<RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY>>(EXPORT_RING_MEMORY_POOL_BLOCK_SIZE, 1, 1);
     // 初始化全局并发内存池，用于节点分配、哈希表等
@@ -148,6 +148,8 @@ int main(int argc, char *argv[])
 
     // 初始化 FASTQ 读取器，将大文件分块读取并送入 ring_pool 用作流水线起点
     FastqReader<N1> reader(filename, k_len, FASTQ_FILE_CHUNK_SIZE, ring_pool.get());
+    FastqParser<N1> parser(k_len, ring_pool.get(), tree.get(), pool.get());
+    
 
     const auto init_end = std::chrono::steady_clock::now();
 
@@ -162,6 +164,9 @@ int main(int argc, char *argv[])
     reader.read();
 
     const auto read_end = std::chrono::steady_clock::now();
+
+    parser.parse_and_push();
+    ring_pool->producer_finished(); // 显式标记 Parser 的生产者角色完成，通知 Tasker 和 Exporter 不再有新数据
 
     // 阻塞等待 Parser 线程将所有文件块解析并生成 k-mer 完成
     parser_thread_pool->join();
