@@ -141,9 +141,9 @@ private:
                 continue;
             }
 
-            local_block_prefix_counts[prefix] = 0;
             ConcurrentDoubleBloomFilter<N> *bloom_filter = tree->get_root_bloom_filter(prefix);
 
+            uint32_t prefix_export_count = 0;
             for (uint32_t i = 0; i < prefix_count; ++i)
             {
                 const kmer<N> &val = local_block_for_copy[read_offset];
@@ -160,10 +160,12 @@ private:
                 if (bloom_filter->insert(val))
                 {
                     local_block_export_bitmap.set(read_offset);
+                    prefix_export_count++;
                 }
 
                 read_offset++;
             }
+            local_block_prefix_counts[prefix] -= prefix_export_count;
         }
 
         for (uint64_t i = 0; i < kmer_count; ++i)
