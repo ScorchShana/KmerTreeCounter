@@ -76,6 +76,8 @@ public:
                 {
                     // 向操作系统让出：如果我们自旋太久，持锁线程
                     // 可能已被抢占。让操作系统调度其他线程。
+                    backoff_iterations = 1;
+                    spin_count = 0;
                     std::this_thread::yield();
                 }
             }
