@@ -27,17 +27,18 @@ public:
     static constexpr uint64_t SEED_C = 0xbb67ae8584caa73bULL; // √3
     static constexpr uint64_t SEED_D = 0x3c6ef372fe94f82bULL; // √5
 
-    explicit ConcurrentDoubleBloomFilter(size_t in_capacity)
+    explicit ConcurrentDoubleBloomFilter(size_t in_capacity, ConcurrentMemoryPool *memory_pool)
         : capacity_(in_capacity), mod(capacity_ - 1)
     {
         // capacity_ must be power of 2
-        filter_bins = new std::atomic<uint64_t>[2 * capacity_]();
+        filter_bins=reinterpret_cast<std::atomic<uint64_t> *>(memory_pool->allocate_before_init_arenas(sizeof(std::atomic<uint64_t>) * 2 * capacity_));
+        //filter_bins = new std::atomic<uint64_t>[2 * capacity_]();
     }
 
-    ~ConcurrentDoubleBloomFilter()
-    {
-        delete[] filter_bins;
-    }
+    // ~ConcurrentDoubleBloomFilter()
+    // {
+    //     delete[] filter_bins;
+    // }
 
     // return whether the element is newly inserted (not exist before)
     bool insert(const kmer<N> &k_mer) noexcept

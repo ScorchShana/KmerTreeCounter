@@ -107,8 +107,10 @@ public:
 
         for (uint64_t i = 0; i < root_bloom_filters.size(); ++i)
         {
-            root_bloom_filters[i] = new ConcurrentDoubleBloomFilter<N>(bloom_filter_capacity);
+            root_bloom_filters[i] = new ConcurrentDoubleBloomFilter<N>(bloom_filter_capacity, memory_pool);
         }
+
+        memory_pool->init_arenas(); // 确保 Arena 已初始化，才能安全分配内存
 
         constexpr uint64_t node_num = 1ULL << (2 * NODE_BASES);
         for (uint64_t i = 0; i < (1ULL << (2 * ROOT_BASES)); ++i)

@@ -110,7 +110,7 @@ int main(int argc, char *argv[])
     // 初始化导出用的环形内存池，管理低频 k-mer 的导出数据块
     auto export_ring_pool = std::make_shared<RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY>>(EXPORT_RING_MEMORY_POOL_BLOCK_SIZE, 1, 1);
     // 初始化全局并发内存池，用于节点分配、哈希表等
-    auto pool = std::make_shared<ConcurrentMemoryPool>(memory_limit * 1024ULL * 1024ULL * 1024ULL, n_thread);
+    auto pool = std::make_shared<ConcurrentMemoryPool>(memory_limit * 1024ULL * 1024ULL * 1024ULL);
 
     // 初始化 k-mer 字典树(KmerTree)的核心结构，整合前述多个组件
     auto tree = std::make_shared<KmerTree<N1>>(k_len, pool.get(), layer_queues.get(), export_ring_pool.get());
