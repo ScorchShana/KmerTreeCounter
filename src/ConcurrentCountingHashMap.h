@@ -19,40 +19,7 @@
 #include <immintrin.h>
 #endif
 
-/*
-template <uint32_t N>
-static constexpr uint64_t hash_func(const kmer<N> &key)
-{
-    uint64_t h = key.data[0];
-    for (uint32_t i = 1; i < N; ++i)
-    {
-        h ^= key.data[i];
-        h *= 0x9e3779b97f4a7c15ULL;
-    }
-    return h;
-}*/
 
-/*
-template <uint32_t N>
-static constexpr uint64_t hash_func(const kmer<N> &key)
-{
-    uint64_t h = key.data[0];
-    for (uint32_t i = 1; i < N; ++i)
-    {
-        h += key.data[i];
-    }
-    return h;
-}
-*/
-
-/*
-template <uint32_t N>
-static constexpr uint64_t hash_func(const kmer<N> &key)
-{
-    uint64_t h = XXH3_64bits(key.data.data(), sizeof(uint64_t) * N);
-    return h;
-}
-*/
 
 static constexpr uint8_t get_ctrl_value(const uint64_t hash_value)
 {

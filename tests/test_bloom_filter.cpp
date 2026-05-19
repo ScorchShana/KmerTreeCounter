@@ -1,5 +1,4 @@
 #include "../src/BloomFilter.h"
-#include "../include/xxh3.h"
 
 #include <algorithm>
 #include <atomic>
@@ -91,7 +90,7 @@ namespace
     {
         size_t operator()(const kmer<N> &value) const noexcept
         {
-            return static_cast<size_t>(XXH3_64bits(&value, sizeof(value)));
+            return static_cast<size_t>(hash_func(value));
         }
     };
 
