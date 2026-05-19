@@ -149,16 +149,15 @@ private:
             for (uint32_t i = 0; i < prefix_count; ++i)
             {
                 const kmer<N> &val = local_block_for_copy[read_offset];
-                /*if (bloom_filter->insert(val))
-                {
-                   export_block_ptr->k_mers[export_kmer_count++] = val;
-                }
-                else
-                {
-                    local_block_for_copy[local_block_count] = val;
-                    local_block_count++;
-                    local_block_prefix_counts[prefix]++;
-                }*/
+                // if (bloom_filter->insert(val))
+                // {
+                //     export_block_ptr->k_mers[prefix_export_count++] = val;
+                // }
+                // else
+                // {
+                //     local_block_for_copy[local_block_count] = val;
+                //     local_block_count++;
+                // }
                 if (bloom_filter->insert(val))
                 {
                     local_block_export_bitmap.set(read_offset);

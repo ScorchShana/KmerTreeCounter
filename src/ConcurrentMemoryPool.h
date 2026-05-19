@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include "definition.h"
 
 // 系统头文件
 #include <sys/mman.h>
@@ -37,19 +38,23 @@
 //==============================================================================
 
 // 最大 NUMA 节点数
-constexpr int MAX_NUMA_NODES = 16;
+static constexpr int MAX_NUMA_NODES = 16;
 
 // 固定块大小（4KB）
-constexpr size_t BLOCK_SIZE = 4096;
+static constexpr size_t BLOCK_SIZE = 4096;
 
 // 从 Arena 批量获取的块数
-constexpr size_t BATCH_SIZE = 64;
+static constexpr size_t BATCH_SIZE = 64;
 
 // 线程本地栈最大缓存块数
-constexpr size_t TLS_CAPACITY = 128;
+static constexpr size_t TLS_CAPACITY = 128;
 
 // 每个远程链表的最大长度
-constexpr size_t REMOTE_LIST_CAPACITY = 32;
+static constexpr size_t REMOTE_LIST_CAPACITY = 32;
+
+//static constexpr size_t CACHE_LINE_SIZE = 64;
+
+
 
 //==============================================================================
 // 辅助工具

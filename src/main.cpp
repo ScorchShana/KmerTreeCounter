@@ -89,7 +89,7 @@ int main(int argc, char *argv[])
 
     // 根据预算计算分给 Worker 的解析(Parser)线程和任务(Tasker)线程的数量
     // Worker 预算去除了主线程(Reader)和导出线程(ExportWriter)
-    const uint32_t parser_num = (n_thread / 6 > 0) ? (n_thread / 6) : 1; // 预留至少 1 个线程给 Parser，剩余线程在 Parser 和 Tasker 之间分配
+    const uint32_t parser_num = (n_thread / 8 > 0) ? (n_thread / 8) : 1; // 预留至少 1 个线程给 Parser，剩余线程在 Parser 和 Tasker 之间分配
     const uint32_t worker_budget = n_thread - 2 - parser_num;
     const uint32_t classifier_num = (worker_budget / (1.0 + TASK_CLASSIFIER_RATIO) == 0) ? 1 : (uint32_t)(worker_budget / (1.0 + TASK_CLASSIFIER_RATIO));
     const uint32_t tasker_num = worker_budget - classifier_num;

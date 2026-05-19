@@ -536,7 +536,7 @@ private:
             auto &buffer = root_buffers[root_prefix];
             auto &buffer_count = root_buffer_counts[root_prefix];
             buffer[buffer_count++] = val;
-            if (buffer_count >= ROOT_BUFFER_KMER_CAPACITY)
+            if (buffer_count >= ROOT_BUFFER_KMER_CAPACITY) [[unlikely]]
             {
                 flush_root_buffer(root_prefix);
             }
@@ -566,7 +566,7 @@ private:
     {
         for (uint64_t i = 0; i < root_buffers.size(); ++i)
         {
-            if (!root_buffer_counts[i] == 0)
+            if (root_buffer_counts[i] != 0)
             {
                 flush_root_buffer(i);
             }

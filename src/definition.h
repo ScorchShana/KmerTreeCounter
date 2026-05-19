@@ -148,7 +148,7 @@ struct KmerBatch
 template <uint32_t N>
 struct alignas(PAGE_SIZE) ExportBlock
 {
-    std::array<kmer<N>, PAGE_SIZE / sizeof(kmer<N>)> k_mers;
+    std::array<kmer<N>, PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)> k_mers;
 };
 
 // 写入k-mer计数
