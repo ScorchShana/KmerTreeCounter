@@ -54,7 +54,7 @@ class KmerTree
     static constexpr uint64_t COUNTING_HASH_TABLE_SIZE = 256 * 1024;
     static constexpr uint64_t KMER_BUFFER_CAPACITY = KMER_BLOCK_SIZE / sizeof(kmer<N>);
 
-    static constexpr int WRITER_WAITING_MAX_BACKOFF = 128;
+    static constexpr int WRITER_WAITING_MAX_BACKOFF = 64;
     static constexpr int WRITER_WAITING_SPIN_TIME = 256;
 
     struct ExportRecord

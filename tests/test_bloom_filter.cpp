@@ -266,7 +266,9 @@ namespace
         // 所以 capacity * 64 = 7.893 * n => capacity = n * 7.893 / 64
         uint64_t target_capacity = static_cast<uint64_t>(unique_count * 7.893 / 64.0);
         const uint64_t capacity = next_power_of_two(target_capacity == 0 ? 1 : target_capacity);
-        ConcurrentDoubleBloomFilter<N> filter(capacity);
+        const size_t filter_bytes = static_cast<size_t>(2) * capacity * sizeof(std::atomic<uint64_t>);
+        ConcurrentMemoryPool memory_pool(filter_bytes);
+        ConcurrentDoubleBloomFilter<N> filter(capacity, &memory_pool);
 
         std::atomic<long long> max_insert_ns{0};
         std::barrier sync_point(static_cast<std::ptrdiff_t>(cfg.num_threads));

@@ -94,7 +94,7 @@ public:
         int backoff_iterations = 2;
         constexpr int MAX_BACKOFF = 64;
         int spin_count = 0;
-        constexpr int YIELD_THRESHOLD = 1000;
+        constexpr int YIELD_THRESHOLD = 256;
 
 #ifdef TEST_MODE
         uint64_t local_spin_loops = 0;

@@ -97,10 +97,7 @@ public:
         {
             if (!has_block)
             {
-                if (!acquire_block(block_ptr, write_size, last_newline_pos, has_block))
-                {
-                    break;
-                }
+                acquire_block(block_ptr, write_size, last_newline_pos, has_block);
             }
 
             if (input_pos >= input_size && !eof)
@@ -182,11 +179,7 @@ public:
                 {
                     store_overlap_from_block_end(block_ptr, write_size, last_newline_pos, overlap);
                     publish_current_block(block_ptr, write_size, last_newline_pos, has_block);
-                    if (!acquire_block(block_ptr, write_size, last_newline_pos, has_block))
-                    {
-                        stop = true;
-                        break;
-                    }
+                    acquire_block(block_ptr, write_size, last_newline_pos, has_block);
                 }
 
                 const uint64_t block_remain = block_size - write_size;
@@ -211,10 +204,7 @@ public:
             {
                 left_buffer_size_ = 0;
                 publish_current_block(block_ptr, write_size, last_newline_pos, has_block);
-                if (!acquire_block(block_ptr, write_size, last_newline_pos, has_block))
-                {
-                    break;
-                }
+                acquire_block(block_ptr, write_size, last_newline_pos, has_block);
             }
 
             last_newline_pos = write_size;
@@ -252,16 +242,12 @@ private:
         }
     }
 
-    inline bool acquire_block(char *&block_ptr,
+    void acquire_block(char *&block_ptr,
                               uint64_t &write_size,
                               uint64_t &last_newline_pos,
                               bool &has_block)
     {
-        if (!ring_memory_pool_ptr_->producer_dequeue(block_ptr))
-        {
-            return false;
-        }
-
+        ring_memory_pool_ptr_->producer_dequeue(block_ptr);
         has_block = true;
         write_size = 0;
         last_newline_pos = kNoNewlineInBlock;
@@ -273,7 +259,6 @@ private:
             write_size = left_buffer_size_;
             left_buffer_size_ = 0;
         }
-        return true;
     }
 
     inline void store_overlap_from_block_end(const char *block_ptr,

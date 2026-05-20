@@ -3,6 +3,7 @@
 
 #include "kmer.h"
 #include "HashFunction.h"
+#include "../include/xxh3.h"
 #include "ConcurrentMemoryPool.h"
 
 #include <array>
@@ -31,8 +32,8 @@ public:
         : capacity_(in_capacity), mod(capacity_ - 1)
     {
         // capacity_ must be power of 2
-        filter_bins=reinterpret_cast<std::atomic<uint64_t> *>(memory_pool->allocate_before_init_arenas(sizeof(std::atomic<uint64_t>) * 2 * capacity_));
-        //filter_bins = new std::atomic<uint64_t>[2 * capacity_]();
+        filter_bins = reinterpret_cast<std::atomic<uint64_t> *>(memory_pool->allocate_before_init_arenas(sizeof(std::atomic<uint64_t>) * 2 * capacity_));
+        // filter_bins = new std::atomic<uint64_t>[2 * capacity_]();
     }
 
     // ~ConcurrentDoubleBloomFilter()
@@ -46,10 +47,13 @@ public:
         // XXH128_hash_t hash_res1 = XXH3_128bits_withSeed(&k_mer, sizeof(k_mer), SEED_A);
         // const uint64_t h1 = hash_res1.low64;
         // const uint64_t h2 = hash_res1.high64 | 1ULL;
-        const uint64_t h1 = hash_func(k_mer, SEED_A);
-        const uint64_t h2 = hash_func(k_mer, SEED_B) | 1ULL;
+        const uint64_t h1 = XXH3_64bits(k_mer.data.data(), sizeof(kmer<N>));
+        const XXH128_hash_t hash128_res = XXH3_128bits(k_mer.data.data(), sizeof(kmer<N>));
+        const uint64_t h2 = hash128_res.high64 | 1ULL;
+        const uint64_t h3 = hash128_res.low64 | 1ULL;
         const uint64_t block1_idx = 2 * (h1 & mod);
         const uint64_t insert_num1 = calculate_insert_num(h1, h2);
+
         const uint64_t snapshot1 = filter_bins[block1_idx].load(std::memory_order_relaxed);
         if ((snapshot1 & insert_num1) != insert_num1)
         {
@@ -60,13 +64,9 @@ public:
             }
         }
 
-        // XXH128_hash_t hash_res2 = XXH3_128bits_withSeed(&k_mer, sizeof(k_mer), SEED_B);
-        // const uint64_t h3 = hash_res2.low64;
-        // const uint64_t h4 = hash_res2.high64 | 1ULL;
-        const uint64_t h3 = hash_func(k_mer, SEED_C);
-        const uint64_t h4 = hash_func(k_mer, SEED_D) | 1ULL;
-        const uint64_t block2_idx = 2 * (h3 & mod) + 1;
-        const uint64_t insert_num2 = calculate_insert_num(h3, h4);
+        const uint64_t block2_idx = block1_idx + 1;
+        const uint64_t insert_num2 = calculate_insert_num(h1, h3);
+
         const uint64_t snapshot2 = filter_bins[block2_idx].load(std::memory_order_relaxed);
         if ((snapshot2 & insert_num2) == insert_num2)
         {
@@ -83,22 +83,24 @@ public:
 
     bool exist(const kmer<N> &k_mer) noexcept
     {
-        const uint64_t h1 = hash_func(k_mer, SEED_A);
-        const uint64_t h2 = hash_func(k_mer, SEED_B) | 1ULL;
+        const uint64_t h1 = XXH3_64bits(k_mer.data.data(), sizeof(kmer<N>));
+        const XXH128_hash_t hash128_res = XXH3_128bits(k_mer.data.data(), sizeof(kmer<N>));
+        const uint64_t h2 = hash128_res.high64 | 1ULL;
+        const uint64_t h3 = hash128_res.low64 | 1ULL;
         const uint64_t block1_idx = 2 * (h1 & mod);
         const uint64_t insert_num1 = calculate_insert_num(h1, h2);
-        const uint64_t cur_bin1 = filter_bins[block1_idx].load(std::memory_order_relaxed);
-        if ((cur_bin1 & insert_num1) != insert_num1)
+
+        const uint64_t snapshot1 = filter_bins[block1_idx].load(std::memory_order_relaxed);
+        if ((snapshot1 & insert_num1) != insert_num1)
         {
             return false; // kmer doesn't exist in the first filter
         }
 
-        const uint64_t h3 = hash_func(k_mer, SEED_C);
-        const uint64_t h4 = hash_func(k_mer, SEED_D) | 1ULL;
-        const uint64_t block2_idx = 2 * (h3 & mod) + 1;
-        const uint64_t insert_num2 = calculate_insert_num(h3, h4);
-        const uint64_t cur_bin2 = filter_bins[block2_idx].load(std::memory_order_relaxed);
-        if ((cur_bin2 & insert_num2) != insert_num2)
+        const uint64_t block2_idx = block1_idx + 1;
+        const uint64_t insert_num2 = calculate_insert_num(h1, h3);
+
+        const uint64_t snapshot2 = filter_bins[block2_idx].load(std::memory_order_relaxed);
+        if ((snapshot2 & insert_num2) != insert_num2)
         {
             return false; // kmer doesn't exist in the second filter
         }

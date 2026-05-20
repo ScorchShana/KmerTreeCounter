@@ -1,5 +1,5 @@
-#ifndef MPMC_RING_QUEUE_HEADER
-#define MPMC_RING_QUEUE_HEADER
+#ifndef MPSC_RING_QUEUE_HEADER
+#define MPSC_RING_QUEUE_HEADER
 
 #include "definition.h"
 
@@ -12,7 +12,7 @@
 #include <utility>
 
 template <typename T, std::size_t Capacity>
-class MPMCRingQueue
+class MPSCRingQueue
 {
 
 	static_assert(Capacity > 1, "Capacity must be greater than 1");
@@ -35,10 +35,10 @@ class MPMCRingQueue
 	std::array<Cell, Capacity> buffer;
 
 public:
-	MPMCRingQueue(const MPMCRingQueue &) = delete;
-	MPMCRingQueue &operator=(const MPMCRingQueue &) = delete;
+	MPSCRingQueue(const MPSCRingQueue &) = delete;
+	MPSCRingQueue &operator=(const MPSCRingQueue &) = delete;
 
-	MPMCRingQueue() : enqueue_pos(0), dequeue_pos(0)
+	MPSCRingQueue() : enqueue_pos(0), dequeue_pos(0)
 	{
 		for (size_t i = 0; i < Capacity; ++i)
 		{
@@ -118,17 +118,12 @@ public:
 
 		if (diff == 0)
 		{
-			if (dequeue_pos.compare_exchange_weak(
-					pos,
-					pos + 1,
-					std::memory_order_relaxed,
-					std::memory_order_relaxed))
-			{
-				item = cell->data;
-				// 回收槽位，发布给生产者
-				cell->sequence.store(pos + Capacity, std::memory_order_release);
-				return true;
-			}
+			dequeue_pos.store(pos + 1, std::memory_order_relaxed);
+			item = cell->data;
+			// 回收槽位，发布给生产者
+			cell->sequence.store(pos + Capacity, std::memory_order_release);
+			return true;
+
 			// CAS 失败时，pos 会被 compare_exchange_weak 更新为当前值
 		}
 		else

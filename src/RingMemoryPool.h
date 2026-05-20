@@ -67,9 +67,9 @@ public:
         producer_to_consumer_.enqueue(content);
     }
 
-    void producer_try_enqueue(const content_type &content)
+    bool producer_try_enqueue(const content_type &content)
     {
-        producer_to_consumer_.try_enqueue(content);
+        return producer_to_consumer_.try_enqueue(content);
     }
 
     // Producer gets a reusable block returned by consumer.
@@ -78,9 +78,9 @@ public:
         return consumer_to_producer_.try_dequeue(block_ptr);
     }
 
-    bool producer_dequeue(char* &block_ptr)
+    void producer_dequeue(char* &block_ptr)
     {
-        return consumer_to_producer_.dequeue(block_ptr);
+        consumer_to_producer_.dequeue(block_ptr);
     }
 
     // Consumer pops processed data from producer.
@@ -89,7 +89,7 @@ public:
         return producer_to_consumer_.try_dequeue(content);
     }
 
-    bool consumer_dequeue(content_type &content)
+    void consumer_dequeue(content_type &content)
     {
         return producer_to_consumer_.dequeue(content);
     }
@@ -135,5 +135,7 @@ private:
     alignas(CACHE_LINE_SIZE) MPMCRingQueue<char*, CAPACITY> consumer_to_producer_;
     alignas(CACHE_LINE_SIZE) std::atomic<int> active_producers_{0};
 };
+
+
 
 #endif // RING_MEMORY_POOL_HEADER

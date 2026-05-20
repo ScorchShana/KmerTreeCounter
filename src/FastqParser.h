@@ -295,8 +295,8 @@ template <uint32_t N>
 class FastqParser
 {
     // 自旋参数
-    static constexpr int YIELD_THRESHOLD = 128;
-    static constexpr int MAX_BACKOFF = 128;
+    static constexpr int YIELD_THRESHOLD = 256;
+    static constexpr int MAX_BACKOFF = 64;
 
     int k_len;
 

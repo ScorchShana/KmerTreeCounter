@@ -139,7 +139,7 @@ int main(int argc, char **argv)
     const uint64_t total_blocks = blocks_needed + extra_blocks;
     const uint64_t pool_bytes = total_blocks * BLOCK_SIZE;
 
-    ConcurrentMemoryPool pool(4ULL * 1024 * 1024 * 1024, num_threads);
+    ConcurrentMemoryPool pool(4ULL * 1024 * 1024 * 1024);
     ConcurrentCountingHashMap<kKmerWords> map(capacity, bucket_memory.get(), &pool);
 
     std::mt19937_64 global_rng(0xBADC0FFEEULL);
