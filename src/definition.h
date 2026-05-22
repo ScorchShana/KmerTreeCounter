@@ -60,7 +60,7 @@ struct content_type
 };
 
 // 解析线程配置常量
-constexpr double TASK_CLASSIFIER_RATIO = 1.3;                  // 分类与任务线程比例
+constexpr double TASK_CLASSIFIER_RATIO = 1.2;                  // 分类与任务线程比例
 
 // 任务线程配置常量
 constexpr uint32_t LOCAL_STACK_SIZE = 64;
@@ -68,7 +68,7 @@ constexpr uint64_t KMER_BIN_SIZE = 2048;
 // constexpr uint32_t MAP_SIZE_FLUSH_INTERVAL = 1024; // 每线程累计新增 key 达到该阈值后批量 flush 到 map_size，降低原子争用
 
 // MPMP环状队列配置常量
-constexpr uint32_t TASK_QUEUE_CAPACITY = 1U << 16; // 1U << 20;
+constexpr uint32_t TASK_QUEUE_CAPACITY = 64U * 1024;
 
 // task线程enqueue尝试次数
 constexpr uint32_t TASK_ENQUEUE_RETRY_LIMIT = 1ULL << 7;

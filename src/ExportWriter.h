@@ -396,11 +396,13 @@ private:
     RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY> *ring_memory_pool = nullptr;
     // 为每个根节点（或者短前缀）维护一个文件句柄
     std::array<int, EXPORT_FILES_SIZE> files{};
-    // 每个根节点对应的最大缓冲容量（默认 8KB）
+    // 每个根节点对应的最大缓冲容量（默认 512KB）
     static constexpr uint64_t ROOT_BUFFER_KMER_CAPACITY = EXPORT_ROOT_BUFFER_SIZE / sizeof(kmer<N>);
+    static constexpr uint64_t LOCAL_BUFFERS_CAPACITY = EXPORT_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>);
     // 对应每个根节点的本地缓存，当装满时通过 fwrite 顺序落盘
     std::array<kmer<N> *, EXPORT_FILES_SIZE> root_buffers{};
     std::array<uint32_t, EXPORT_FILES_SIZE> root_buffer_counts{};
+
     // 专门执行落盘操作的单线程
     std::thread worker_thread;
     std::atomic<bool> is_running{false};
