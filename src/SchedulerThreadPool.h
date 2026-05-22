@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <utility>
 #include <barrier>
+#include <limits>
 
 constexpr uint64_t TSL_HASH_TABLE_SIZE = 512 * 1024;
 
@@ -22,13 +23,14 @@ template <uint32_t N>
 class SchedulerThreadPool final
 {
 
-    static constexpr uint32_t WORKER_QUEUE_CAPACITY = 256;
+    static constexpr uint32_t WORKER_QUEUE_CAPACITY = 4;
     static constexpr uint32_t FORMAL_WORKER_BATCH = 100;
 
     static constexpr uint32_t BACKLOG_PER_WORKER_TARGET = 2;
     static constexpr uint32_t MIN_BACKLOG_GATE_PRODUCING = 2;
     static constexpr uint32_t MIN_BACKLOG_GATE_DRAINING = 1;
     static constexpr uint32_t PRESSURE_WINDOW_BASE = 16;
+    static constexpr uint32_t INVALID_DEPTH = MAX_DEPTH;
 
     // 以下是调度算法的参数
     static constexpr double SCORE_EMPTY_PENALTY = 0.20;
@@ -41,13 +43,13 @@ class SchedulerThreadPool final
     static constexpr double SCORE_SCALE_DOWN_THRESHOLD = -0.25;
 
     // 以下是worker线程状态机的参数
-    static constexpr uint32_t SPIN_LIMIT_WAIT_DEPTH = 64;
-    static constexpr uint32_t SPIN_LIMIT_BOUND_DEPTH = 32;
-    static constexpr uint32_t MAX_BACKOFF_WAIT_DEPTH = 256;
-    static constexpr uint32_t MAX_BACKOFF_BOUND_DEPTH = 128;
+    static constexpr uint32_t SPIN_LIMIT_WAIT_DEPTH = 128;
+    static constexpr uint32_t SPIN_LIMIT_BOUND_DEPTH = 64;
+    static constexpr uint32_t MAX_BACKOFF_WAIT_DEPTH = 128;
+    static constexpr uint32_t MAX_BACKOFF_BOUND_DEPTH = 64;
     static constexpr uint32_t RELEASE_ROUNDS_PRODUCING = 4;
     static constexpr uint32_t RELEASE_ROUNDS_DRAINING = 2;
-    static constexpr uint32_t FORCE_LOCAL_STACK_EVERY_K_CANNOT_SWITCH = 16;
+    static constexpr uint32_t FORCE_LOCAL_STACK_EVERY_K_CANNOT_SWITCH = 64;
     static constexpr uint32_t DRAIN_EMPTY_CONFIRM_ROUNDS = 2;
 
     const uint32_t worker_count_;
@@ -63,6 +65,8 @@ class SchedulerThreadPool final
 
     std::array<std::atomic<int>, MAX_DEPTH> real_active_workers;
     std::vector<std::atomic<uint32_t>> worker_last_depth;
+    std::vector<std::atomic<uint8_t>> worker_is_bound;
+    std::vector<std::atomic<uint32_t>> worker_current_depth;
 
 // 测试模式
 #ifdef TEST_MODE
@@ -75,12 +79,14 @@ class SchedulerThreadPool final
 
 public:
     explicit SchedulerThreadPool(uint32_t worker_count, uint32_t producer_count, KmerTree<N> *tree_ptr, LayerQueues<N> *layer_queues_ptr)
-        : worker_count_(worker_count), active_producer(producer_count), tree_ptr_(tree_ptr), layer_queues_ptr_(layer_queues_ptr), worker_queues_(worker_count - 1), worker_last_depth(worker_count - 1)
+        : worker_count_(worker_count), active_producer(producer_count), tree_ptr_(tree_ptr), layer_queues_ptr_(layer_queues_ptr), worker_queues_(worker_count - 1), worker_last_depth(worker_count - 1), worker_is_bound(worker_count - 1), worker_current_depth(worker_count - 1)
     {
         worker_threads_ptr_.reserve(worker_count_ - 1);
-        for (int i = 0; i + 1 < worker_count_; i++)
+        for (uint32_t i = 0; i + 1 < worker_count_; i++)
         {
             worker_last_depth[i].store(0, std::memory_order_relaxed);
+            worker_is_bound[i].store(0, std::memory_order_relaxed);
+            worker_current_depth[i].store(INVALID_DEPTH, std::memory_order_relaxed);
         }
     }
 
@@ -102,7 +108,7 @@ public:
         {
             real_active_workers[i].store(0, std::memory_order_relaxed);
         }
-        for (int i = 0; i + 1 < worker_count_; ++i)
+        for (uint32_t i = 0; i + 1 < worker_count_; ++i)
         {
             worker_threads_ptr_.push_back(std::make_unique<std::thread>(&SchedulerThreadPool::worker_thread_loop, this, i));
         }
@@ -158,9 +164,16 @@ private:
             return false;
         }
 
+        if (next_depth >= MAX_DEPTH)
+        {
+            return false;
+        }
+
         current_depth = next_depth;
         has_depth = true;
+        worker_current_depth[worker_id].store(current_depth, std::memory_order_relaxed);
         real_active_workers[current_depth].fetch_add(1, std::memory_order_relaxed);
+        worker_is_bound[worker_id].store(1, std::memory_order_release);
         return true;
     }
 
@@ -172,6 +185,11 @@ private:
             return false;
         }
 
+        if (next_depth >= MAX_DEPTH)
+        {
+            return false;
+        }
+
         if (next_depth == current_depth)
         {
             return true;
@@ -179,6 +197,7 @@ private:
 
         real_active_workers[current_depth].fetch_sub(1, std::memory_order_relaxed);
         current_depth = next_depth;
+        worker_current_depth[worker_id].store(current_depth, std::memory_order_relaxed);
         real_active_workers[current_depth].fetch_add(1, std::memory_order_relaxed);
 #ifdef TEST_MODE
         switch_success_count.fetch_add(1, std::memory_order_relaxed);
@@ -214,7 +233,7 @@ private:
         return true;
     }
 
-    void release_depth_if_bound(const uint32_t current_depth, bool &has_depth)
+    void release_depth_if_bound(const uint32_t worker_id, const uint32_t current_depth, bool &has_depth)
     {
         if (!has_depth)
         {
@@ -223,6 +242,8 @@ private:
 
         real_active_workers[current_depth].fetch_sub(1, std::memory_order_relaxed);
         has_depth = false;
+        worker_current_depth[worker_id].store(INVALID_DEPTH, std::memory_order_relaxed);
+        worker_is_bound[worker_id].store(0, std::memory_order_release);
 #ifdef TEST_MODE
         depth_release_count.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -341,7 +362,7 @@ private:
         if (const uint32_t release_rounds = draining_mode ? RELEASE_ROUNDS_DRAINING : RELEASE_ROUNDS_PRODUCING;
             context.empty_rounds_at_depth >= release_rounds)
         {
-            release_depth_if_bound(context.current_depth, context.has_depth);
+            release_depth_if_bound(worker_id, context.current_depth, context.has_depth);
             context.state = WorkerState::WAIT_DEPTH;
             context.empty_rounds_at_depth = 0;
             context.cannot_switch_count = 0;
@@ -403,7 +424,7 @@ private:
             handle_bound_depth_state(worker_id, draining_mode, task, context);
         }
 
-        release_depth_if_bound(context.current_depth, context.has_depth);
+        release_depth_if_bound(worker_id, context.current_depth, context.has_depth);
         drain_all_depths_and_local_stack(task);
 
 #ifdef TEST_MODE
@@ -568,53 +589,245 @@ private:
 
             const bool producers_done = active_producer.load(std::memory_order_acquire) == 0;
             const uint32_t min_backlog_gate = producers_done ? MIN_BACKLOG_GATE_DRAINING : MIN_BACKLOG_GATE_PRODUCING;
-            auto can_assign_depth = [&](const uint32_t depth) -> bool
+
+            std::array<uint32_t, MAX_DEPTH> target_threads;
+            for (uint32_t depth = 0; depth < MAX_DEPTH; ++depth)
             {
                 const uint32_t backlog = queue_size[depth];
                 if (backlog < min_backlog_gate)
                 {
+                    target_threads[depth] = 0;
+                    continue;
+                }
+
+                uint32_t target = (backlog + BACKLOG_PER_WORKER_TARGET - 1) / BACKLOG_PER_WORKER_TARGET;
+                target = std::max<uint32_t>(target, min_threads_limit[depth]);
+                target = std::min<uint32_t>(target, dynamic_max_threads[depth]);
+                target_threads[depth] = target;
+            }
+
+            std::array<int32_t, MAX_DEPTH> planned_active;
+            for (uint32_t depth = 0; depth < MAX_DEPTH; ++depth)
+            {
+                planned_active[depth] = real_active_workers[depth].load(std::memory_order_relaxed);
+            }
+
+            for (uint32_t worker_id = 0; worker_id < available_workers; ++worker_id)
+            {
+                if (worker_queues_[worker_id].empty())
+                {
+                    continue;
+                }
+
+                const uint32_t pending_depth = worker_last_depth[worker_id].load(std::memory_order_relaxed);
+                if (pending_depth >= MAX_DEPTH)
+                {
+                    continue;
+                }
+
+                if (worker_is_bound[worker_id].load(std::memory_order_acquire) != 0)
+                {
+                    const uint32_t current_depth = worker_current_depth[worker_id].load(std::memory_order_relaxed);
+                    if (current_depth < MAX_DEPTH && current_depth != pending_depth)
+                    {
+                        if (planned_active[current_depth] > 0)
+                        {
+                            planned_active[current_depth]--;
+                        }
+                        planned_active[pending_depth]++;
+                    }
+                }
+                else
+                {
+                    planned_active[pending_depth]++;
+                }
+            }
+
+            auto can_assign_depth = [&](const uint32_t depth) -> bool
+            {
+                if (depth >= MAX_DEPTH)
+                {
                     return false;
                 }
 
-                uint32_t target_threads = (backlog + BACKLOG_PER_WORKER_TARGET - 1) / BACKLOG_PER_WORKER_TARGET;
-                target_threads = std::max<uint32_t>(target_threads, min_threads_limit[depth]);
-                target_threads = std::min<uint32_t>(target_threads, dynamic_max_threads[depth]);
-                const int target_threads_i = static_cast<int>(target_threads);
+                if (queue_size[depth] < min_backlog_gate)
+                {
+                    return false;
+                }
 
-                return real_active_workers[depth].load(std::memory_order_relaxed) < target_threads_i;
+                return planned_active[depth] < static_cast<int32_t>(target_threads[depth]);
+            };
+
+            auto pick_best_deficit_depth = [&]() -> uint32_t
+            {
+                for (const auto &s : scores)
+                {
+                    const uint32_t depth = s.second;
+                    if (can_assign_depth(depth))
+                    {
+                        return depth;
+                    }
+                }
+                return INVALID_DEPTH;
             };
 
             for (uint32_t worker_id = 0; worker_id < available_workers; worker_id++)
             {
-                if (worker_queues_[worker_id].size() <= 1)
+                if (worker_is_bound[worker_id].load(std::memory_order_acquire) != 0)
                 {
-                    uint32_t last_depth = worker_last_depth[worker_id].load(std::memory_order_relaxed);
-                    bool assigned = false;
+                    continue;
+                }
 
-                    if (can_assign_depth(last_depth))
+                if (!worker_queues_[worker_id].empty())
+                {
+                    continue;
+                }
+
+                const uint32_t last_depth = worker_last_depth[worker_id].load(std::memory_order_relaxed);
+                uint32_t selected_depth = INVALID_DEPTH;
+
+                if (can_assign_depth(last_depth))
+                {
+                    selected_depth = last_depth;
+                }
+                else
+                {
+                    selected_depth = pick_best_deficit_depth();
+                }
+
+                if (selected_depth != INVALID_DEPTH &&
+                    worker_is_bound[worker_id].load(std::memory_order_acquire) == 0 &&
+                    worker_queues_[worker_id].empty() &&
+                    worker_queues_[worker_id].try_enqueue(selected_depth)) [[likely]]
+                {
+                    worker_last_depth[worker_id].store(selected_depth, std::memory_order_relaxed);
+                    planned_active[selected_depth]++;
+                }
+            }
+
+            auto is_burst_depth = [&](const uint32_t depth) -> bool
+            {
+                return fill_ratio[depth] > 0.75 ||
+                       pressure[depth] > 0.85 ||
+                       pressure_diff[depth] > 0.12;
+            };
+
+            auto should_migrate_depth = [&](const uint32_t depth) -> bool
+            {
+                if (depth >= MAX_DEPTH || target_threads[depth] == 0)
+                {
+                    return false;
+                }
+
+                const int32_t deficit = static_cast<int32_t>(target_threads[depth]) - planned_active[depth];
+                if (deficit <= 0)
+                {
+                    return false;
+                }
+
+                return is_burst_depth(depth) || planned_active[depth] == 0 || deficit >= 2;
+            };
+
+            auto can_donate_depth = [&](const uint32_t depth) -> bool
+            {
+                if (depth >= MAX_DEPTH)
+                {
+                    return false;
+                }
+
+                if (pressure[depth] > 0.65)
+                {
+                    return false;
+                }
+
+                return planned_active[depth] > static_cast<int32_t>(target_threads[depth]);
+            };
+
+            auto find_donor_worker = [&](const uint32_t dst) -> int32_t
+            {
+                int32_t best_worker = -1;
+                double best_pressure = 2.0;
+                int32_t best_excess = std::numeric_limits<int32_t>::min();
+
+                for (uint32_t worker_id = 0; worker_id < available_workers; ++worker_id)
+                {
+                    if (worker_is_bound[worker_id].load(std::memory_order_acquire) == 0)
                     {
-                        assigned = worker_queues_[worker_id].try_enqueue(last_depth);
+                        continue;
                     }
 
-                    if (!assigned)
+                    if (!worker_queues_[worker_id].empty())
                     {
-                        for (auto &s : scores)
-                        {
-                            uint32_t d = s.second;
-                            if (can_assign_depth(d))
-                            {
-                                if (worker_queues_[worker_id].try_enqueue(d)) [[likely]]
-                                {
-                                    worker_last_depth[worker_id].store(d, std::memory_order_relaxed);
-                                    break;
-                                }
-                            }
-                        }
+                        continue;
+                    }
+
+                    const uint32_t src = worker_current_depth[worker_id].load(std::memory_order_relaxed);
+                    if (src >= MAX_DEPTH || src == dst || !can_donate_depth(src))
+                    {
+                        continue;
+                    }
+
+                    const int32_t excess = planned_active[src] - static_cast<int32_t>(target_threads[src]);
+                    if (pressure[src] < best_pressure || (pressure[src] == best_pressure && excess > best_excess))
+                    {
+                        best_pressure = pressure[src];
+                        best_excess = excess;
+                        best_worker = static_cast<int32_t>(worker_id);
+                    }
+                }
+
+                return best_worker;
+            };
+
+            uint32_t migration_budget = std::max<uint32_t>(1, available_workers / 8);
+            for (const auto &s : scores)
+            {
+                if (migration_budget == 0)
+                {
+                    break;
+                }
+
+                const uint32_t dst = s.second;
+                if (!should_migrate_depth(dst))
+                {
+                    continue;
+                }
+
+                while (migration_budget > 0 && can_assign_depth(dst))
+                {
+                    const int32_t donor = find_donor_worker(dst);
+                    if (donor < 0)
+                    {
+                        break;
+                    }
+
+                    const uint32_t donor_id = static_cast<uint32_t>(donor);
+                    if (worker_is_bound[donor_id].load(std::memory_order_acquire) == 0 || !worker_queues_[donor_id].empty())
+                    {
+                        break;
+                    }
+
+                    const uint32_t src = worker_current_depth[donor_id].load(std::memory_order_relaxed);
+                    if (src >= MAX_DEPTH || src == dst || !can_donate_depth(src))
+                    {
+                        break;
+                    }
+
+                    if (worker_queues_[donor_id].try_enqueue(dst)) [[likely]]
+                    {
+                        worker_last_depth[donor_id].store(dst, std::memory_order_relaxed);
+                        planned_active[src]--;
+                        planned_active[dst]++;
+                        --migration_budget;
+                    }
+                    else
+                    {
+                        break;
                     }
                 }
             }
 
-            std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+            std::this_thread::sleep_for(std::chrono::nanoseconds(500));
         }
     }
 };

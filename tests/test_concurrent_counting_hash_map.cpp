@@ -140,6 +140,7 @@ int main(int argc, char **argv)
     const uint64_t pool_bytes = total_blocks * BLOCK_SIZE;
 
     ConcurrentMemoryPool pool(4ULL * 1024 * 1024 * 1024);
+    pool.init_arenas();
     ConcurrentCountingHashMap<kKmerWords> map(capacity, bucket_memory.get(), &pool);
 
     std::mt19937_64 global_rng(0xBADC0FFEEULL);
