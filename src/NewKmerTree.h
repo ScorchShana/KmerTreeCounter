@@ -118,7 +118,7 @@ public:
             // 分配 (1 << (2 * NODE_BASES))个连续节点
             void *raw_mem = memory_pool->allocate();
             new (raw_mem) node<N>[ node_num ]();
-            root_nodes[i].children_ptr = reinterpret_cast<node<N> *>(raw_mem);
+            root_nodes[i].children_ptr.store(reinterpret_cast<node<N> *>(raw_mem), std::memory_order_relaxed);
         }
     }
 
@@ -233,10 +233,10 @@ public:
 
                 while (remaining > 0)
                 {
+
                     {
                         std::lock_guard lock(target_root->buffer_lock);
-                        target_root->writer_count.fetch_add(1, std::memory_order_release);
-
+                        target_root->writer_count.fetch_add(1, std::memory_order_relaxed);
                         active_block = target_root->active_block;
 
                         if (active_block == nullptr) [[unlikely]]
@@ -268,7 +268,7 @@ public:
                                 int backoff = 1;
                                 int spin_time = 0;
 
-                                while (target_root->writer_count.load(std::memory_order_relaxed) > 1)
+                                while (target_root->writer_count.load(std::memory_order_acquire) > 1)
                                 {
                                     for (int i = 0; i < backoff; i++)
                                     {
@@ -298,7 +298,6 @@ public:
                         block_original_count = active_block->count;
                         space_left = capacity - block_original_count;
                         this_copy = static_cast<uint64_t>((space_left < remaining) ? space_left : remaining);
-                        remaining -= this_copy;
                         active_block->count += this_copy;
                     }
 
@@ -307,6 +306,7 @@ public:
                                 static_cast<size_t>(this_copy) * sizeof(kmer<N>));
 
                     block_for_copy_offset += this_copy;
+                    remaining -= this_copy;
                     target_root->writer_count.fetch_sub(1, std::memory_order_release);
 
                     if (enqueue_required) [[unlikely]]
@@ -675,7 +675,7 @@ private:
         }
         if (t.depth >= MAX_DEPTH - 1)
         {
-            std::cout<<"Warning: Reached max depth but child slab already exists. Inserting into hash map." << std::endl;
+            std::cout << "Warning: Reached max depth but child slab already exists. Inserting into hash map." << std::endl;
             // Has existing child slab but can't descend at this depth
             insert_kmer_in_task_to_node_hash_map(t);
             return;
@@ -903,7 +903,7 @@ private:
         {
             {
                 std::lock_guard lock(child_node->buffer_lock);
-                child_node->writer_count.fetch_add(1, std::memory_order_release);
+                child_node->writer_count.fetch_add(1, std::memory_order_relaxed);
 
                 active_block = child_node->active_block;
 
@@ -936,7 +936,7 @@ private:
                         int backoff = 1;
                         int spin_time = 0;
 
-                        while (child_node->writer_count.load(std::memory_order_relaxed) > 1)
+                        while (child_node->writer_count.load(std::memory_order_acquire) > 1)
                         {
                             for (int i = 0; i < backoff; i++)
                             {
@@ -966,7 +966,6 @@ private:
                 block_original_count = active_block->count;
                 space_left = capacity - block_original_count;
                 this_copy = static_cast<uint64_t>((space_left < remaining) ? space_left : remaining);
-                remaining -= this_copy;
                 child_node->active_block->count += this_copy;
             }
 
@@ -975,6 +974,7 @@ private:
                         static_cast<size_t>(this_copy) * sizeof(kmer<N>));
 
             block_for_copy_offset += this_copy;
+            remaining -= this_copy;
             child_node->writer_count.fetch_sub(1, std::memory_order_release);
 
             if (enqueue_required) [[unlikely]]
@@ -1021,15 +1021,20 @@ private:
 
     node<N> *ensure_child_slab(node<N> *parent)
     {
-        node<N> *child_slab = parent->children_ptr.load(std::memory_order_acquire);
         node<N> *CONSTRUCTING = reinterpret_cast<node<N> *>(MAGIC_POINTER);
+        node<N> *child_slab = parent->children_ptr.load(std::memory_order_acquire);
+
+        if (child_slab != nullptr && child_slab != CONSTRUCTING) [[likely]]
+        {
+            return child_slab;
+        }
 
         if (child_slab == nullptr)
         {
             node<N> *expected = nullptr;
 
             if (parent->children_ptr.compare_exchange_strong(expected, CONSTRUCTING,
-                                                             std::memory_order_acq_rel, std::memory_order_acquire))
+                                                             std::memory_order_relaxed, std::memory_order_relaxed))
             {
                 constexpr uint64_t node_num = 1ULL << (2 * NODE_BASES);
                 // 分配 (1 << (2 * NODE_BASES))个连续节点
@@ -1083,12 +1088,17 @@ private:
         ConcurrentCountingHashMap<N> *hash_map = parent->hash_map.load(std::memory_order_acquire);
         ConcurrentCountingHashMap<N> *CONSTRUCTING = reinterpret_cast<ConcurrentCountingHashMap<N> *>(MAGIC_POINTER);
 
+        if (hash_map != nullptr && hash_map != CONSTRUCTING) [[likely]]
+        {
+            return hash_map;
+        }
+
         if (hash_map == nullptr)
         {
             ConcurrentCountingHashMap<N> *expected = nullptr;
 
             if (parent->hash_map.compare_exchange_strong(expected, CONSTRUCTING,
-                                                           std::memory_order_acq_rel, std::memory_order_acquire))
+                                                         std::memory_order_relaxed, std::memory_order_relaxed))
             {
                 // need to fix
                 ConcurrentCountingHashMap<N> *hash_map_mem = reinterpret_cast<ConcurrentCountingHashMap<N> *>(memory_pool->allocate_large(sizeof(ConcurrentCountingHashMap<N>)));
@@ -1208,10 +1218,6 @@ private:
 
         leaf->count = 0;
         leaf->active_block = nullptr;
-    }
-
-    void write_low_frequency_kmer_to_block()
-    {
     }
 
     // ==========================================
