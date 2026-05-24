@@ -484,7 +484,7 @@ private:
             if (i == 0)
             {
                 soft_max_limit[i] = std::min<uint32_t>(
-                    std::max<uint32_t>(2, available_workers / 4s),
+                    std::max<uint32_t>(2, available_workers / 4),
                     max_quota);
                 hard_max_limit[i] = max_quota;
             }
