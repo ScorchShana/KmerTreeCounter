@@ -1,5 +1,5 @@
-#ifndef COUNTING_HASH_TABLE_HEADER
-#define COUNTING_HASH_TABLE_HEADER
+#ifndef COUNTING_HASH_MAP_HEADER
+#define COUNTING_HASH_MAP_HEADER
 
 #include "kmer.h"
 
@@ -16,7 +16,7 @@
 #endif
 
 /**
- * @brief CountingHashTable - A high-performance, cache-friendly hash table for counting
+ * @brief CountingHashMap - A high-performance, cache-friendly hash table for counting
  *
  * Features:
  * - Header-only, single-threaded
@@ -33,7 +33,7 @@ template <
     uint32_t N,
     size_t MaxBytes = 256 * 1024,
     typename ValueType = uint32_t>
-class CountingHashTable
+class CountingHashMap
 {
 
 public:
@@ -45,7 +45,7 @@ public:
         ValueType value;
     } Entry;
 
-    CountingHashTable() = default;
+    CountingHashMap() = default;
 
     /**
      * @brief Increment the count for a key, or insert with value 1 if not exists
@@ -169,7 +169,7 @@ private:
 
 // Implementation
 template <uint32_t N, size_t MaxBytes, typename ValueType>
-bool CountingHashTable<N, MaxBytes, ValueType>::increment(const KeyType &key)
+bool CountingHashMap<N, MaxBytes, ValueType>::increment(const KeyType &key)
 {
     uint64_t h = hash_key(key);
     uint8_t fp = fingerprint(h);
@@ -211,10 +211,10 @@ bool CountingHashTable<N, MaxBytes, ValueType>::increment(const KeyType &key)
     {
         return false;
     }
-    // if (first_empty == SIZE_MAX) [[unlikely]]
-    // {
-    //     return false;
-    // }
+    if (first_empty == SIZE_MAX) [[unlikely]]
+    {
+        return false;
+    }
 
     // Insert new entry
     controls_[first_empty] = fp;
@@ -231,7 +231,7 @@ bool CountingHashTable<N, MaxBytes, ValueType>::increment(const KeyType &key)
 
 template <uint32_t N, size_t MaxBytes, typename ValueType>
 template <typename Func>
-void CountingHashTable<N, MaxBytes, ValueType>::for_each(Func &&func)
+void CountingHashMap<N, MaxBytes, ValueType>::for_each(Func &&func)
 {
     for (size_t i = 0; i < CAPACITY; ++i)
     {
@@ -244,7 +244,7 @@ void CountingHashTable<N, MaxBytes, ValueType>::for_each(Func &&func)
 
 template <uint32_t N, size_t MaxBytes, typename ValueType>
 template <typename Func>
-void CountingHashTable<N, MaxBytes, ValueType>::for_each(Func &&func) const
+void CountingHashMap<N, MaxBytes, ValueType>::for_each(Func &&func) const
 {
     for (size_t i = 0; i < CAPACITY; ++i)
     {
@@ -256,7 +256,7 @@ void CountingHashTable<N, MaxBytes, ValueType>::for_each(Func &&func) const
 }
 
 template <uint32_t N, size_t MaxBytes, typename ValueType>
-void CountingHashTable<N, MaxBytes, ValueType>::clear()
+void CountingHashMap<N, MaxBytes, ValueType>::clear()
 {
     std::memset(controls_, 0, CAPACITY + GROUP_SIZE - 1);
     size_ = 0;

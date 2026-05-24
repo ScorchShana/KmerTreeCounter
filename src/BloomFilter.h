@@ -47,10 +47,9 @@ public:
         // XXH128_hash_t hash_res1 = XXH3_128bits_withSeed(&k_mer, sizeof(k_mer), SEED_A);
         // const uint64_t h1 = hash_res1.low64;
         // const uint64_t h2 = hash_res1.high64 | 1ULL;
-        const uint64_t h1 = XXH3_64bits(k_mer.data.data(), sizeof(kmer<N>));
-        const XXH128_hash_t hash128_res = XXH3_128bits(k_mer.data.data(), sizeof(kmer<N>));
-        const uint64_t h2 = hash128_res.high64 | 1ULL;
-        const uint64_t h3 = hash128_res.low64 | 1ULL;
+        const uint64_t h1 = XXH3_64bits_withSeed(k_mer.data.data(), sizeof(kmer<N>), SEED_A);
+        const uint64_t h2 = XXH3_64bits_withSeed(k_mer.data.data(), sizeof(kmer<N>), SEED_B) | 1ULL;
+        const uint64_t h3 = XXH3_64bits_withSeed(k_mer.data.data(), sizeof(kmer<N>), SEED_C) | 1ULL;
         const uint64_t block1_idx = 2 * (h1 & mod);
         const uint64_t insert_num1 = calculate_insert_num(h1, h2);
 
@@ -83,10 +82,9 @@ public:
 
     bool exist(const kmer<N> &k_mer) noexcept
     {
-        const uint64_t h1 = XXH3_64bits(k_mer.data.data(), sizeof(kmer<N>));
-        const XXH128_hash_t hash128_res = XXH3_128bits(k_mer.data.data(), sizeof(kmer<N>));
-        const uint64_t h2 = hash128_res.high64 | 1ULL;
-        const uint64_t h3 = hash128_res.low64 | 1ULL;
+        const uint64_t h1 = XXH3_64bits_withSeed(k_mer.data.data(), sizeof(kmer<N>), SEED_A);
+        const uint64_t h2 = XXH3_64bits_withSeed(k_mer.data.data(), sizeof(kmer<N>), SEED_B) | 1ULL;
+        const uint64_t h3 = XXH3_64bits_withSeed(k_mer.data.data(), sizeof(kmer<N>), SEED_C) | 1ULL;
         const uint64_t block1_idx = 2 * (h1 & mod);
         const uint64_t insert_num1 = calculate_insert_num(h1, h2);
 

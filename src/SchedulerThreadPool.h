@@ -1,7 +1,6 @@
 #ifndef SCHEDULER_THREAD_POOL_HEADER
 #define SCHEDULER_THREAD_POOL_HEADER
 
-#include "CountingHashTable.h"
 #include "definition.h"
 #include "LayerQueues.h"
 #include "MPMCRingQueue.h"
@@ -484,8 +483,10 @@ private:
             min_threads_limit[i] = 1;
             if (i == 0)
             {
-                soft_max_limit[i] = std::min<uint32_t>(2, available_workers);
-                hard_max_limit[i] = std::min<uint32_t>(available_workers, std::max<uint32_t>(2, available_workers / 2));
+                soft_max_limit[i] = std::min<uint32_t>(
+                    std::max<uint32_t>(2, available_workers / 4s),
+                    max_quota);
+                hard_max_limit[i] = max_quota;
             }
             else
             {
@@ -520,13 +521,20 @@ private:
 
             for (uint32_t i = 0; i < MAX_DEPTH; i++)
             {
+                const bool should_expand_cap =
+                    fill_ratio[i] > 0.85 ||
+                    (i == 0 && (pressure[i] > 0.85 || pressure_diff[i] > 0.12));
+                const bool should_shrink_cap =
+                    fill_ratio[i] < 0.6 &&
+                    (i != 0 || (pressure[i] < 0.55 && pressure_diff[i] <= 0.0));
+
                 // 1. 如果水压严重爆表，天花板临时打开，允许向硬顶靠拢
-                if (fill_ratio[i] > 0.85 && max_threads_limit[i] < hard_max_limit[i])
+                if (should_expand_cap && max_threads_limit[i] < hard_max_limit[i])
                 {
                     max_threads_limit[i]++;
                 }
                 // 2. 如果水压恢复正常（甚至低于平时），天花板慢慢降回软顶
-                else if (fill_ratio[i] < 0.6 && max_threads_limit[i] > soft_max_limit[i])
+                else if (should_shrink_cap && max_threads_limit[i] > soft_max_limit[i])
                 {
                     max_threads_limit[i]--;
                 }

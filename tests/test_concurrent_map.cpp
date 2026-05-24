@@ -1,6 +1,6 @@
-#define CONCURRENT_COUNTING_HASH_MAP_TESTING
+#define CONCURRENT_MAP_TESTING
 
-#include "../src/ConcurrentCountingHashMap.h"
+#include "../src/ConcurrentMap.h"
 #include "../src/ConcurrentMemoryPool.h"
 #include "../src/definition.h"
 
@@ -129,12 +129,12 @@ int main(int argc, char **argv)
 
     const uint64_t num_threads = cfg.num_threads;
 
-    const uint64_t capacity = std::bit_ceil((uint64_t)(cfg.total_inserts * (1 - cfg.duplicate_prob)/200));
-    const uint64_t bucket_bytes = capacity * ConcurrentCountingHashMap<kKmerWords>::BUCKET_SIZE;
+    const uint64_t capacity = std::bit_ceil((uint64_t)(cfg.total_inserts * (1 - cfg.duplicate_prob)));
+    const uint64_t bucket_bytes = capacity * sizeof(bucket<kKmerWords>);
     std::unique_ptr<char[]> bucket_memory(new char[bucket_bytes]);
 
     const uint64_t max_unique = cfg.total_inserts * (1 - cfg.duplicate_prob);
-    const uint64_t slots_per_block = NodeBlock<kKmerWords>::kMaxSlots;
+    const uint64_t slots_per_block = KMER_BLOCK_SIZE / sizeof(concurrent_node<kKmerWords>);
     const uint64_t blocks_needed = (max_unique + slots_per_block - 1) / slots_per_block;
     const uint64_t extra_blocks = 64;
     const uint64_t total_blocks = blocks_needed + extra_blocks;
@@ -142,7 +142,7 @@ int main(int argc, char **argv)
 
     ConcurrentMemoryPool pool(4ULL * 1024 * 1024 * 1024);
     pool.init_arenas();
-    ConcurrentCountingHashMap<kKmerWords> map(capacity, bucket_memory.get(), &pool);
+    ConcurrentMap<kKmerWords> map(capacity, bucket_memory.get(), &pool);
 
     std::mt19937_64 global_rng(0xBADC0FFEEULL);
     std::uniform_int_distribution<uint64_t> global_dist(0, std::numeric_limits<uint64_t>::max());

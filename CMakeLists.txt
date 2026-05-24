@@ -36,4 +36,9 @@ add_executable(concurrent_double_bloom_filter_test tests/test_bloom_filter.cpp)
 target_link_libraries(concurrent_double_bloom_filter_test pthread)
 target_link_libraries(concurrent_double_bloom_filter_test numa)
 
+add_executable(concurrent_map_test tests/test_concurrent_map.cpp)
+target_link_libraries(concurrent_map_test pthread)
+target_link_libraries(concurrent_map_test numa)
+add_test(NAME ConcurrentMapTest COMMAND concurrent_map_test 1000 10)
+
 
