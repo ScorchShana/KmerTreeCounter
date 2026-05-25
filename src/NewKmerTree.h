@@ -94,6 +94,8 @@ class KmerTree
     static inline thread_local std::vector<Task<N>> thread_local_task_stack;
     static inline thread_local std::vector<ExportRecord> thread_local_export_buffer;
     static inline thread_local CountingHashMap<N> thread_local_counting_has_map;
+    // 提前分配的spare block
+    static inline thread_local char *thread_local_spare_block = nullptr;
 
 public:
     // 根节点数组，2^(2 * ROOT_BASES) 个，每个对应一种短前缀
@@ -222,6 +224,9 @@ public:
             node<N> *target_root = &root_nodes[i];
             node<N> *local_root = &local_root_nodes[i];
 
+            task.current_node = target_root;
+            task.depth = 0;
+
             for (uint64_t block_index = 0; block_index < local_root->count; ++block_index)
             {
                 bool enqueue_required = false;
@@ -235,6 +240,7 @@ public:
 
                 while (remaining > 0)
                 {
+                    ensure_spare_block();
 
                     {
                         std::lock_guard lock(target_root->buffer_lock);
@@ -243,7 +249,7 @@ public:
 
                         if (active_block == nullptr) [[unlikely]]
                         {
-                            active_block = reinterpret_cast<kmer_block<N> *>(memory_pool->allocate());
+                            active_block = reinterpret_cast<kmer_block<N> *>(get_spare_block());
                             active_block->count = 0;
                             target_root->active_block = active_block;
                             target_root->kmer_blocks[target_root->count++] = target_root->active_block;
@@ -253,8 +259,6 @@ public:
                             if (target_root->count >= MAX_KMER_BLOCK_NUM) [[unlikely]]
                             {
                                 // node已满
-                                task.current_node = target_root;
-                                task.depth = 0;
                                 task.kmer_blocks = target_root->kmer_blocks;
                                 task.count = target_root->count;
 
@@ -262,7 +266,7 @@ public:
 
                                 target_root->count = 0;
 
-                                active_block = reinterpret_cast<kmer_block<N> *>(memory_pool->allocate());
+                                active_block = reinterpret_cast<kmer_block<N> *>(get_spare_block());
                                 active_block->count = 0;
                                 target_root->active_block = active_block;
                                 target_root->kmer_blocks[target_root->count++] = target_root->active_block;
@@ -290,7 +294,7 @@ public:
                             }
                             else
                             {
-                                active_block = reinterpret_cast<kmer_block<N> *>(memory_pool->allocate());
+                                active_block = reinterpret_cast<kmer_block<N> *>(get_spare_block());
                                 active_block->count = 0;
                                 target_root->active_block = active_block;
                                 target_root->kmer_blocks[target_root->count++] = target_root->active_block;
@@ -322,6 +326,7 @@ public:
                 memory_pool->deallocate(local_root->kmer_blocks[block_index]);
             }
         }
+        release_spare_block();
     }
 
     void main_add_kmer_block_with_local_root_nodes(std::array<kmer<N>, PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)> &kmer_block_for_copy, std::array<uint32_t, 1ULL << (2 * ROOT_BASES)> &kmer_prefix_counts, node<N> *local_root_nodes)
@@ -909,17 +914,28 @@ private:
         uint64_t this_copy;
         kmer_block<N> *active_block;
 
+        task.current_node = child_node;
+        task.depth = current_depth + 1;
+
+        ensure_spare_block();
+
         while (remaining > 0)
         {
+            bool need_spare = false;
+
             {
                 std::lock_guard lock(child_node->buffer_lock);
                 child_node->writer_count.fetch_add(1, std::memory_order_relaxed);
 
                 active_block = child_node->active_block;
 
+                bool need_new_block =
+                    (active_block == nullptr) ||
+                    (active_block->count >= capacity);
+
                 if (active_block == nullptr) [[unlikely]]
                 {
-                    active_block = reinterpret_cast<kmer_block<N> *>(memory_pool->allocate());
+                    active_block = reinterpret_cast<kmer_block<N> *>(get_spare_block());
                     active_block->count = 0;
                     child_node->active_block = active_block;
                     child_node->kmer_blocks[child_node->count++] = child_node->active_block;
@@ -929,8 +945,6 @@ private:
                     if (child_node->count >= MAX_KMER_BLOCK_NUM) [[unlikely]]
                     {
                         // node已满
-                        task.current_node = child_node;
-                        task.depth = current_depth + 1;
                         task.kmer_blocks = child_node->kmer_blocks;
                         task.count = child_node->count;
 
@@ -938,7 +952,7 @@ private:
 
                         child_node->count = 0;
 
-                        active_block = reinterpret_cast<kmer_block<N> *>(memory_pool->allocate());
+                        active_block = reinterpret_cast<kmer_block<N> *>(get_spare_block());
                         active_block->count = 0;
                         child_node->active_block = active_block;
                         child_node->kmer_blocks[child_node->count++] = child_node->active_block;
@@ -966,17 +980,17 @@ private:
                     }
                     else
                     {
-                        active_block = reinterpret_cast<kmer_block<N> *>(memory_pool->allocate());
+                        active_block = reinterpret_cast<kmer_block<N> *>(get_spare_block());
                         active_block->count = 0;
                         child_node->active_block = active_block;
-                        child_node->kmer_blocks[child_node->count++] = child_node->active_block;
+                        child_node->kmer_blocks[child_node->count++] = active_block;
                     }
                 }
 
                 block_original_count = active_block->count;
                 space_left = capacity - block_original_count;
                 this_copy = static_cast<uint64_t>((space_left < remaining) ? space_left : remaining);
-                child_node->active_block->count += this_copy;
+                active_block->count += this_copy;
             }
 
             std::memcpy(active_block->k_mers.data() + block_original_count,
@@ -1007,6 +1021,11 @@ private:
                     cpu_relax();
                 }
             }
+
+            if (need_spare) [[unlikely]]
+            {
+                ensure_spare_block();
+            }
         }
     }
 
@@ -1029,7 +1048,7 @@ private:
         }
     }
 
-    void flush_local_counting_hash_map_to_hash_map(ConcurrentMap<N> *hash_map, uint64_t& local_size_count)
+    void flush_local_counting_hash_map_to_hash_map(ConcurrentMap<N> *hash_map, uint64_t &local_size_count)
     {
         thread_local_counting_has_map.for_each([&](const kmer<N> &kmer_key, const uint32_t count)
                                                { hash_map->increment(kmer_key, local_size_count, count); });
@@ -1234,6 +1253,28 @@ private:
 
         leaf->count = 0;
         leaf->active_block = nullptr;
+    }
+
+    void ensure_spare_block()
+    {
+        if (thread_local_spare_block == nullptr)
+        {
+            thread_local_spare_block = reinterpret_cast<char *>(memory_pool->allocate());
+        }
+    }
+
+    // must use after ensure_spare_block()
+    char *get_spare_block()
+    {
+        char *block = thread_local_spare_block;
+        thread_local_spare_block = nullptr;
+        return block;
+    }
+
+    void release_spare_block()
+    {
+        memory_pool->deallocate(thread_local_spare_block);
+        thread_local_spare_block = nullptr;
     }
 
     // ==========================================

@@ -666,6 +666,18 @@ private:
                 return planned_active[depth] < static_cast<int32_t>(target_threads[depth]);
             };
 
+            auto is_burst_depth = [&](const uint32_t depth) -> bool
+            {
+                if (depth >= MAX_DEPTH)
+                {
+                    return false;
+                }
+
+                return fill_ratio[depth] > 0.75 ||
+                       pressure[depth] > 0.85 ||
+                       pressure_diff[depth] > 0.12;
+            };
+
             auto pick_best_deficit_depth = [&]() -> uint32_t
             {
                 for (const auto &s : scores)
@@ -679,6 +691,20 @@ private:
                 return INVALID_DEPTH;
             };
 
+            auto pick_best_burst_deficit_depth = [&]() -> uint32_t
+            {
+                for (const auto &s : scores)
+                {
+                    const uint32_t depth = s.second;
+                    if (is_burst_depth(depth) && can_assign_depth(depth))
+                    {
+                        return depth;
+                    }
+                }
+                return INVALID_DEPTH;
+            };
+
+            uint32_t burst_bypass_budget = std::max<uint32_t>(1, available_workers / 4);
             for (uint32_t worker_id = 0; worker_id < available_workers; worker_id++)
             {
                 if (worker_is_bound[worker_id].load(std::memory_order_acquire) != 0)
@@ -693,14 +719,28 @@ private:
 
                 const uint32_t last_depth = worker_last_depth[worker_id].load(std::memory_order_relaxed);
                 uint32_t selected_depth = INVALID_DEPTH;
+                bool selected_by_burst_bypass = false;
 
-                if (can_assign_depth(last_depth))
+                if (can_assign_depth(last_depth) && is_burst_depth(last_depth))
                 {
                     selected_depth = last_depth;
                 }
                 else
                 {
-                    selected_depth = pick_best_deficit_depth();
+                    const uint32_t burst_depth = (burst_bypass_budget > 0) ? pick_best_burst_deficit_depth() : INVALID_DEPTH;
+                    if (burst_depth != INVALID_DEPTH)
+                    {
+                        selected_depth = burst_depth;
+                        selected_by_burst_bypass = true;
+                    }
+                    else if (can_assign_depth(last_depth))
+                    {
+                        selected_depth = last_depth;
+                    }
+                    else
+                    {
+                        selected_depth = pick_best_deficit_depth();
+                    }
                 }
 
                 if (selected_depth != INVALID_DEPTH &&
@@ -710,15 +750,12 @@ private:
                 {
                     worker_last_depth[worker_id].store(selected_depth, std::memory_order_relaxed);
                     planned_active[selected_depth]++;
+                    if (selected_by_burst_bypass)
+                    {
+                        --burst_bypass_budget;
+                    }
                 }
             }
-
-            auto is_burst_depth = [&](const uint32_t depth) -> bool
-            {
-                return fill_ratio[depth] > 0.75 ||
-                       pressure[depth] > 0.85 ||
-                       pressure_diff[depth] > 0.12;
-            };
 
             auto should_migrate_depth = [&](const uint32_t depth) -> bool
             {
@@ -787,7 +824,7 @@ private:
                 return best_worker;
             };
 
-            uint32_t migration_budget = std::max<uint32_t>(1, available_workers / 8);
+            uint32_t migration_budget = std::max<uint32_t>(1, available_workers / 4);
             for (const auto &s : scores)
             {
                 if (migration_budget == 0)

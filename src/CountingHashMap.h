@@ -31,7 +31,7 @@
  */
 template <
     uint32_t N,
-    size_t MaxBytes = 256 * 1024,
+    size_t MaxBytes = 128 * 1024,
     typename ValueType = uint32_t>
 class CountingHashMap
 {
