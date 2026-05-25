@@ -426,7 +426,6 @@ public:
                 std::cerr << "Failed to open export file: " << filename << std::endl;
                 std::exit(-1);
             }
-            
         }
         std::memset(root_buffer_counts.data(), 0, root_buffer_counts.size() * sizeof(uint32_t));
     }
@@ -473,11 +472,12 @@ private:
     void writer_loop()
     {
 
-        for (uint64_t i = 0; i < files.size(); ++i){
+        for (uint64_t i = 0; i < files.size(); ++i)
+        {
             root_buffers[i] = new kmer<N>[ROOT_BUFFER_KMER_CAPACITY];
         }
 
-            int spin_time = 0;
+        int spin_time = 0;
         int backoff = 1;
 
         char *block_ptr = nullptr;

@@ -496,16 +496,17 @@ private:
 
             for (uint64_t i = 0; i < input_kmer_block->count; ++i)
             {
-                if (!thread_local_counting_has_map.increment(input_kmer_block->k_mers[i])) [[unlikely]]
-                {
-                    flush_local_counting_hash_map_to_hash_map(hash_map, local_size_count);
-                }
-                thread_local_counting_has_map.increment(input_kmer_block->k_mers[i]);
+                // if (!thread_local_counting_has_map.increment(input_kmer_block->k_mers[i])) [[unlikely]]
+                // {
+                //     flush_local_counting_hash_map_to_hash_map(hash_map, local_size_count);
+                //     thread_local_counting_has_map.increment(input_kmer_block->k_mers[i]);
+                // }
+                hash_map->increment(input_kmer_block->k_mers[i], local_size_count, 1);
             }
             memory_pool->deallocate(input_kmer_block);
         }
 
-        flush_local_counting_hash_map_to_hash_map(hash_map, local_size_count);
+        // flush_local_counting_hash_map_to_hash_map(hash_map, local_size_count);
         hash_map->add_size(local_size_count);
     }
 

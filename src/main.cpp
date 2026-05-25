@@ -89,7 +89,7 @@ int main(int argc, char *argv[])
 
     // 根据预算计算分给 Worker 的解析(Parser)线程和任务(Tasker)线程的数量
     // Worker 预算去除了主线程(Reader)和导出线程(ExportWriter)
-    const uint32_t parser_num = (n_thread / 8 > 0) ? (n_thread / 8) : 1; // 预留至少 1 个线程给 Parser，剩余线程在 Parser 和 Tasker 之间分配
+    const uint32_t parser_num = (n_thread / 16 > 0) ? (n_thread / 16) : 1; // 预留至少 1 个线程给 Parser，剩余线程在 Parser 和 Tasker 之间分配
     const uint32_t worker_budget = n_thread - 2 - parser_num;
     const uint32_t classifier_num = (worker_budget / (1.0 + TASK_CLASSIFIER_RATIO) == 0) ? 1 : (uint32_t)(worker_budget / (1.0 + TASK_CLASSIFIER_RATIO));
     const uint32_t tasker_num = worker_budget - classifier_num;
@@ -163,16 +163,18 @@ int main(int argc, char *argv[])
 
     const auto mid_end = std::chrono::steady_clock::now();
 
-    const auto final_start = std::chrono::steady_clock::now();
-
-    // Final drain 阶段：多线程并行遍历整个字典树，将在节点中暂存但未下发的 k-mers 全部合并到全局哈希表中
-    tree->final_drain_parallel(n_thread - 1);
-
     // 标记所有的缓存已经发送完毕，向导出环形队列发送 nullptr 或退出标志
+    const auto export_join_start = std::chrono::steady_clock::now();
     tree->mark_finish_export();
 
     // 阻塞等待导出器将所有低频 k-mer 都安全写入磁盘完成
     export_writer->join();
+    const auto export_join_end = std::chrono::steady_clock::now();
+
+    const auto final_start = std::chrono::steady_clock::now();
+
+    // Final drain 阶段：多线程并行遍历整个字典树，将在节点中暂存但未下发的 k-mers 全部合并到全局哈希表中
+    tree->final_drain_parallel(n_thread);
 
     std::cout << "Total read k-mer count: " << parser_thread_pool->get_total_read_kmer() << std::endl;
 
@@ -181,6 +183,7 @@ int main(int argc, char *argv[])
     const auto init_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(init_end - init_start).count();
     const auto read_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(read_end - read_start).count();
     const auto mid_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(mid_end - mid_start).count();
+    const auto export_join_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(export_join_end - export_join_start).count();
     const auto final_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(final_end - final_start).count();
     const auto total_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(final_end - init_start).count();
     const auto parse_task_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(task_end - parser_end).count();
@@ -191,6 +194,7 @@ int main(int argc, char *argv[])
     std::cout << "Mid elapsed us: " << mid_elapsed_us << std::endl;
     std::cout << "Between Read and Parse elapsed us: " << read_parse_elapsed_us << std::endl;
     std::cout << "Between Parse and Task elapsed us: " << parse_task_elapsed_us << std::endl;
+    std::cout << "Export join elapsed us: " << export_join_elapsed_us << std::endl;
     std::cout << "Final elapsed us: " << final_elapsed_us << std::endl;
     std::cout << "Total elapsed us: " << total_elapsed_us << std::endl;
 
