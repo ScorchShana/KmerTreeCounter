@@ -208,7 +208,7 @@ private:
                 if (bloom_filter->insert(val))
                 {
                     local_block_export_bitmap.set(read_offset);
-                    export_block_ptr->k_mers[export_kmer_block_count++] = val;
+                    export_block_ptr->k_mers[export_kmer_block_count++] = local_block_for_copy[read_offset];
                     prefix_export_count++;
 
                     if (export_kmer_block_count == EXPORT_KMER_BLOCK_CAPACITY) [[unlikely]]

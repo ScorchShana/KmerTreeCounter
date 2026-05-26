@@ -74,7 +74,7 @@ public:
         const uint64_t last_bin2 = filter_bins[block2_idx].fetch_or(insert_num2, std::memory_order_relaxed);
         if ((last_bin2 & insert_num2) != insert_num2)
         {
-            return true; // kmer doesn't exist in the second filter
+            return false; // kmer doesn't exist in the second filter
         }
 
         return false; // kmer exists in both filters
