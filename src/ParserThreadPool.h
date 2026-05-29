@@ -23,7 +23,6 @@ class ParserThreadPool
 {
 
     int k;
-    KmerTree<N> *tree = nullptr;
     ConcurrentMemoryPool *pool = nullptr;
     SPMCRingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY> *reader_parser_ring_pool;
     RingMemoryPool<PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY> *parser_classifier_ring_pool;
@@ -39,13 +38,12 @@ public:
     std::atomic<uint64_t> consumer_dequeue_spin_time{0};
 #endif
 
-    explicit ParserThreadPool(const int in_k, KmerTree<N> *tree_ptr,
+    explicit ParserThreadPool(const int in_k,
                               ConcurrentMemoryPool *pool_ptr,
                               SPMCRingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY> *in_reader_parser_ring_pool_ptr,
                               RingMemoryPool<PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY> *in_parser_classifier_ring_pool_ptr,
                               uint32_t in_parser_count)
         : k(in_k),
-          tree(tree_ptr),
           pool(pool_ptr),
           reader_parser_ring_pool(in_reader_parser_ring_pool_ptr),
           parser_classifier_ring_pool(in_parser_classifier_ring_pool_ptr),
@@ -61,7 +59,7 @@ public:
             threads_ptr.push_back(std::make_unique<std::thread>([&]
                                                                 {
                                                                     std::this_thread::sleep_for(std::chrono::nanoseconds(20));
-                                                                    FastqParser<N> parser(k, reader_parser_ring_pool, parser_classifier_ring_pool, tree);
+                                                                    FastqParser<N> parser(k, reader_parser_ring_pool, parser_classifier_ring_pool);
                                                                     parser.parse_and_push();
                                                                     total_read_kmer += parser.get_total_read_kmer();
                                                                     parser_classifier_ring_pool->producer_set_finished();

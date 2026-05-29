@@ -48,9 +48,8 @@ constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY = 1ULL << 12;    
 constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE = 64ULL * 1024; // 环形内存池块大小（字节）
 
 // 写入文件部分的RingMemoryPool配置常量
-constexpr uint64_t EXPORT_RING_MEMORY_POOL_CAPACITY = 1ULL << 10;                       // 导出环形内存池容量（块数），必须为2的幂
+constexpr uint64_t EXPORT_RING_MEMORY_POOL_CAPACITY = 1ULL << 10;                                      // 导出环形内存池容量（块数），必须为2的幂
 constexpr uint64_t EXPORT_RING_MEMORY_POOL_BLOCK_SIZE = PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE; // 导出环形内存池块大小（字节）
-
 
 // RingMemoryPool 生产者队列的内容
 struct content_type
@@ -60,7 +59,7 @@ struct content_type
 };
 
 // 解析线程配置常量
-constexpr double TASK_CLASSIFIER_RATIO = 1;                  // 分类与任务线程比例
+constexpr double TASK_CLASSIFIER_RATIO = 1; // 分类与任务线程比例
 
 // 任务线程配置常量
 constexpr uint32_t LOCAL_STACK_SIZE = 64;
@@ -74,7 +73,7 @@ constexpr uint32_t TASK_QUEUE_CAPACITY = 64U * 1024;
 constexpr uint32_t TASK_ENQUEUE_RETRY_LIMIT = 1ULL << 7;
 
 // Final drain 导出配置
-constexpr uint64_t DRAIN_EXPORT_BUFFER_SIZE = 4 * 1024 * 1024; // final drain 导出缓冲区大小（字节）
+constexpr uint64_t DRAIN_EXPORT_BUFFER_SIZE = 2 * 1024 * 1024; // final drain 导出缓冲区大小（字节）
 
 // k-mer 计数过滤区间（闭区间）
 inline uint32_t min_count = 1;
@@ -92,7 +91,7 @@ constexpr uint64_t KMER_BATCH_SIZE = 1024; // KmerBatch 的总大小（字节）
 
 // ExportWriter配置常量
 constexpr uint64_t EXPORT_FILES_SIZE = 1ULL << (2 * ROOT_BASES); // 最大同时打开文件数量
-constexpr uint64_t EXPORT_ROOT_BUFFER_SIZE = 512 * 1024;                                          // 每个根节点的导出缓冲区大小（字节）
+constexpr uint64_t EXPORT_ROOT_BUFFER_SIZE = 512 * 1024;         // 每个根节点的导出缓冲区大小（字节）
 
 static_assert(KMER_BIN_SIZE < KMER_BLOCK_SIZE, "KMER_BIN_SIZE must be less than KMER_BLOCK_SIZE");
 static_assert(KMER_BIN_SIZE < KMER_BLOCK_SIZE, "KMER_BIN_SIZE must be less than KMER_BLOCK_SIZE");
@@ -158,6 +157,12 @@ alignas(CACHE_LINE_SIZE) inline std::atomic<uint64_t> sorted_kmer_count{0};
 inline std::string temp_dir = "./tmp/";
 
 inline uint64_t bloom_filter_capacity = 1ULL << 18; // Bloom Filter容量，单位为元素数量
+
+// 标记哪些前缀是热的
+inline std::array<uint8_t, 1U << (2 * ROOT_BASES)> prefix_hot;
+
+// 标记哪些冷门前缀合并到对应的布隆过滤器的Index
+inline std::array<uint8_t, 1U << (2 * ROOT_BASES)> prefix_to_bloom_index;
 
 /*#ifdef TEST_MODE
 inline std::array<std::atomic<uint64_t>, 1ULL << (2 * ROOT_BASES)> root_counts{};

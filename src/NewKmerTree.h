@@ -109,9 +109,28 @@ public:
     {
         root_nodes = new node<N>[1ULL << (2 * ROOT_BASES)]();
 
+        int last_bloom_index = -1;
+        ConcurrentDoubleBloomFilter<N> *last_bloom_filter = nullptr;
         for (uint64_t i = 0; i < root_bloom_filters.size(); ++i)
         {
-            root_bloom_filters[i] = new ConcurrentDoubleBloomFilter<N>(bloom_filter_capacity, memory_pool);
+            if (last_bloom_filter == nullptr || prefix_to_bloom_index[i] != last_bloom_index)
+            {
+                if (prefix_hot[i])
+                {
+                    root_bloom_filters[i] = new ConcurrentDoubleBloomFilter<N>(bloom_filter_capacity * 2ULL, memory_pool);
+                }
+                else
+                {
+                    root_bloom_filters[i] = new ConcurrentDoubleBloomFilter<N>(bloom_filter_capacity, memory_pool);
+                }
+
+                last_bloom_filter = root_bloom_filters[i];
+                last_bloom_index = prefix_to_bloom_index[i];
+            }
+            else
+            {
+                root_bloom_filters[i] = last_bloom_filter;
+            }
         }
 
         memory_pool->init_arenas(); // 确保 Arena 已初始化，才能安全分配内存
@@ -128,9 +147,17 @@ public:
 
     ~KmerTree()
     {
+        int last_bloom_index = -1;
+        ConcurrentDoubleBloomFilter<N> *last_bloom_filter = nullptr;
         for (uint64_t i = 0; i < root_bloom_filters.size(); ++i)
         {
-            delete root_bloom_filters[i];
+            if (last_bloom_filter != nullptr && prefix_to_bloom_index[i] != last_bloom_index)
+            {
+
+                last_bloom_filter = root_bloom_filters[i];
+                last_bloom_index = prefix_to_bloom_index[i];
+                delete root_bloom_filters[i];
+            }
             root_bloom_filters[i] = nullptr;
         }
         delete[] root_nodes;

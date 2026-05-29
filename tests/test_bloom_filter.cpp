@@ -258,13 +258,13 @@ namespace
         const uint64_t unique_count = expected.unique_count;
         const uint64_t expected_true = expected.expected_true;
 
-        // 计算 0.1% (0.001) 误判率所需的 capacity:
-        // 因为是两层独立的 Bloom Filter，每层 P_layer = sqrt(0.001) ≈ 0.03162
+        // 计算 1% (0.01) 误判率所需的 capacity:
+        // 因为是两层独立的 Bloom Filter，每层 P_layer = sqrt(0.01) ≈ 0.1
         // 且每层 k = 3，根据公式 P = (1 - e^(-k * n / m))^k 
-        // 求解得到 m/n ≈ -3 / ln(1 - 0.03162^(1/3)) ≈ 7.893 bits/element
+        // 求解得到 m/n ≈ -3 / ln(1 - 0.1^(1/3)) ≈ 4.808 bits/element
         // 每层容量为 capacity 个 uint64_t (即 capacity * 64 bits)
-        // 所以 capacity * 64 = 7.893 * n => capacity = n * 7.893 / 64
-        uint64_t target_capacity = static_cast<uint64_t>(unique_count * 7.893 / 64.0);
+        // 所以 capacity * 64 = 4.808 * n => capacity = n * 4.808 / 64
+        uint64_t target_capacity = static_cast<uint64_t>(unique_count * 4.808 / 64.0);
         const uint64_t capacity = next_power_of_two(target_capacity == 0 ? 1 : target_capacity);
         const size_t filter_bytes = static_cast<size_t>(2) * capacity * sizeof(std::atomic<uint64_t>);
         ConcurrentMemoryPool memory_pool(filter_bytes);

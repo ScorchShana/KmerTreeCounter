@@ -22,7 +22,7 @@ class RingMemoryPool
     static_assert((CAPACITY & (CAPACITY - 1)) == 0, "RingMemoryPool capacity must be a power of 2");
 
 public:
-    explicit RingMemoryPool(uint64_t block_size_, uint32_t producer_num, uint32_t consumer_num)
+    explicit RingMemoryPool(uint64_t block_size_, uint32_t producer_num)
         : block_size_(block_size_),
           memory_pool_(check_pool_size(CAPACITY, block_size_)),
           producer_to_consumer_(),
@@ -59,7 +59,12 @@ public:
 
     inline bool producer_finished() const noexcept
     {
-        return active_producers_.load(std::memory_order_relaxed) <= 0;
+        return active_producers_.load(std::memory_order_acquire) <= 0;
+    }
+
+    void reset_producers(uint32_t producer_num)
+    {
+        active_producers_.store(producer_num, std::memory_order_release);
     }
 
     // Producer pushes processed data for consumer.
@@ -74,12 +79,12 @@ public:
     }
 
     // Producer gets a reusable block returned by consumer.
-    bool producer_try_dequeue(char* &block_ptr)
+    bool producer_try_dequeue(char *&block_ptr)
     {
         return consumer_to_producer_.try_dequeue(block_ptr);
     }
 
-    void producer_dequeue(char* &block_ptr)
+    void producer_dequeue(char *&block_ptr)
     {
         consumer_to_producer_.dequeue(block_ptr);
     }
@@ -133,7 +138,7 @@ private:
     uint64_t block_size_ = 0;
     std::vector<char> memory_pool_;
     alignas(CACHE_LINE_SIZE) MPMCRingQueue<content_type, CAPACITY> producer_to_consumer_;
-    alignas(CACHE_LINE_SIZE) MPMCRingQueue<char*, CAPACITY> consumer_to_producer_;
+    alignas(CACHE_LINE_SIZE) MPMCRingQueue<char *, CAPACITY> consumer_to_producer_;
     alignas(CACHE_LINE_SIZE) std::atomic<int> active_producers_{0};
 };
 
@@ -143,7 +148,7 @@ class SPMCRingMemoryPool
     static_assert((CAPACITY & (CAPACITY - 1)) == 0, "SPMCRingMemoryPool capacity must be a power of 2");
 
 public:
-    explicit SPMCRingMemoryPool(uint64_t block_size_, uint32_t producer_num, uint32_t consumer_num)
+    explicit SPMCRingMemoryPool(uint64_t block_size_, uint32_t producer_num)
         : block_size_(block_size_),
           memory_pool_(check_pool_size(CAPACITY, block_size_)),
           producer_to_consumer_(),
@@ -180,7 +185,12 @@ public:
 
     inline bool producer_finished() const noexcept
     {
-        return active_producers_.load(std::memory_order_relaxed) <= 0;
+        return active_producers_.load(std::memory_order_acquire) <= 0;
+    }
+
+    void reset_producers(uint32_t producer_num)
+    {
+        active_producers_.store(producer_num, std::memory_order_release);
     }
 
     // Producer pushes processed data for consumer.

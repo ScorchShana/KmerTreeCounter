@@ -313,9 +313,10 @@ public:
         content_kmer_count = 0;
 
         // 当队列确实为空且生产者已结束时才退出循环
-        while (true)
+        while (not_empty || !reader_parser_ring_pool->producer_finished())
         {
-            if (reader_parser_ring_pool->consumer_try_dequeue(reader_parser_content))
+            not_empty = reader_parser_ring_pool->consumer_try_dequeue(reader_parser_content);
+            if (not_empty)
             {
 
 #ifdef TEST_MODE
@@ -357,10 +358,6 @@ public:
                 backoff_iterations = 1;
                 spin_count = 0;
             }
-            else if (reader_parser_ring_pool->producer_finished())
-            {
-                break;
-            }
             else
             {
 
@@ -390,13 +387,10 @@ public:
             }
         }
 
-        if (content_kmer_count > 0)
-        {
-            parser_classifier_content.length = content_kmer_count;
-            enqueue_content_to_classifier(parser_classifier_content);
-            total_read_kmer += content_kmer_count;
-        }
-        get_kmer.clear();
+        parser_classifier_content.length = content_kmer_count;
+        enqueue_content_to_classifier(parser_classifier_content);
+        total_read_kmer += content_kmer_count;
+        content_kmer_count = 0;
     }
 
     uint64_t get_total_read_kmer() const noexcept
@@ -429,6 +423,8 @@ private:
         // 解析出 k-mer 后，total_read_kmer += k-mer数量;
         // 解析出 k-mer 后，写入 parser_classifier_content.data，并设置 parser_classifier_content.length
         kmer<N> *kmer_buffer = reinterpret_cast<kmer<N> *>(parser_classifier_content.data);
+
+        get_kmer.clear();
 
 #if defined(__AVX2__)
         // 一次处理32字节

@@ -4,6 +4,7 @@
 #include "definition.h"
 #include "kmer.h"
 #include "ConcurrentMemoryPool.h"
+#include "../include/xxh3.h"
 
 #include <array>
 #include <atomic>
@@ -95,16 +96,17 @@ public:
     // 哈希：将 k-mer 映射到桶索引
     uint64_t hash_func(const kmer<N> &k_mer) const
     {
-        uint64_t h = k_mer.data[0];
-        for (uint32_t i = 1; i < N; i++)
-        {
-            h ^= k_mer.data[i];
-            h *= 0xc4ceb9fe1a85ec53ULL;
-        }
-        h ^= h >> 33;
-        h *= 0xff51afd7ed558ccdULL;
-        h ^= h >> 33;
-        return h;
+        // uint64_t h = k_mer.data[0];
+        // for (uint32_t i = 1; i < N; i++)
+        // {
+        //     h ^= k_mer.data[i];
+        //     h *= 0xc4ceb9fe1a85ec53ULL;
+        // }
+        // h ^= h >> 33;
+        // h *= 0xff51afd7ed558ccdULL;
+        // h ^= h >> 33;
+        // return h;
+        return XXH3_64bits(&k_mer, sizeof(kmer<N>));
     }
 
     void increment(const kmer<N> &k_mer, uint64_t &local_size_count, const uint32_t &count = 1)

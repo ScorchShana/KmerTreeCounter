@@ -5,17 +5,76 @@
 
 #include "kmer.h"
 
+// 将一个 uint64 值内部混合，消除低位/高位的简单模式
+static inline uint64_t mix64(uint64_t x)
+{
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    x = x ^ (x >> 31);
+    return x;
+}
+
+// 最终混合：MurmurHash3 的 64-bit finalizer
+static inline uint64_t finalize(uint64_t h)
+{
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
+    return h;
+}
+
+/**
+ * 计算 1~4 个 uint64 元素的哈希值
+ * @param arr  数组指针
+ * @param len  元素个数，必须为 1..4
+ * @return 64 位哈希值
+ */
+template <uint32_t N>
+uint64_t hash_func(const kmer<N> &arr)
+{
+    // 初始值：用黄金比例乘以长度，保证不同长度起点不同
+    uint64_t h = 0x9e3779b97f4a7c15ULL * N;
+    // 再混入一个与长度相关的常数，进一步强化区分
+    h += 0x85ebca77c2b2ae63ULL; // prime5 from xxHash64
+
+    for (int i = 0; i < N; ++i)
+    {
+        uint64_t x = mix64(arr.data[i]); // 1. 元素内部雪崩
+        h ^= x;                          // 2. 异或混入
+        h = (h << 27) | (h >> 37);       // 3. 旋转 27 位
+        h = h * 0x9e3779b97f4a7c15ULL +  // 4. 乘加（prime1, prime2）
+            0x165667b19e3779f9ULL;
+    }
+
+    return finalize(h);
+}
 
 template <uint32_t N>
-inline uint64_t hash_func(const kmer<N> &key, const uint64_t seed = 0) noexcept
+void double_hash_func(const kmer<N> &arr, uint64_t &h1_out, uint64_t &h2_out)
 {
-    uint64_t h = key.data[0] ^ seed;
-    for (uint32_t i = 1; i < N; ++i)
+    // 两个不同的初始值（不同黄金比例倍数 + 偏移）
+    uint64_t h1 = 0x9e3779b97f4a7c15ULL * N + 0x85ebca77c2b2ae63ULL;
+    uint64_t h2 = 0x9e3779b97f4a7c15ULL * (N ^ 0x9e3779b9) + 0x9e3779b97f4a7c15ULL;
+
+    for (int i = 0; i < N; ++i)
     {
-        h ^= key.data[i];
-        h *= 0x9e3779b97f4a7c15ULL;
+        uint64_t x = mix64(arr.data[i]);
+
+        // h1 路径：旋转 + 乘加
+        h1 ^= x;
+        h1 = (h1 << 27) | (h1 >> 37);
+        h1 = h1 * 0x9e3779b97f4a7c15ULL + 0x165667b19e3779f9ULL;
+
+        // h2 路径：使用不同的旋转量和常数，保证独立性
+        h2 ^= x;
+        h2 = (h2 << 31) | (h2 >> 33); // 不同旋转量（31）
+        h2 = h2 * 0xbf58476d1ce4e5b9ULL + 0x94d049bb133111ebULL;
     }
-    return h;
+
+    h1_out = finalize(h1);
+    h2_out = finalize(h2) | 1; // 确保步长为奇数（对 2 的幂表）
 }
 
 /*

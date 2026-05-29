@@ -123,11 +123,11 @@ public:
             uint64_t code = (packed_codes >> (2 * (count - 1 - kk))) & 0x3ULL;  // 从旧到新
 
             // 单碱基插入工作副本
-            seq_work.shift_right(1);
+            seq_work.template shift_right_static<1>();
             seq_work.data[0] |= (code << (BASES_PER_U64T * 2 - 2));
             if (remainder != 0) seq_work.data[N - 1] &= back_mask;
 
-            rev_work.shift_left(1);
+            rev_work.template shift_left_static<1>();
             rev_work.data[N - 1] |= ((code ^ 0b11ULL) << rev_insert_shift);
 
             if (++old_have >= k) {

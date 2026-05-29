@@ -3,17 +3,21 @@
 
 #include "definition.h"
 
-#include <cstdio>
-#include <cstdlib>
 #include <string>
 #include <iostream>
 #include <stdexcept>
 #include <type_traits>
+#include <vector>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstring>
 
 class FinalDrainWriter
 {
 private:
-    std::FILE *out_file = nullptr;
+    int out_file = -1;
+    std::vector<char> buffer;
+    int buffer_offset = 0;
 
 public:
     FinalDrainWriter(const FinalDrainWriter &) = delete;
@@ -21,41 +25,40 @@ public:
     FinalDrainWriter(FinalDrainWriter &&) = delete;
     FinalDrainWriter &operator=(FinalDrainWriter &&) = delete;
 
-    explicit FinalDrainWriter() : out_file(nullptr) {}
+    explicit FinalDrainWriter() : out_file(-1), buffer(DRAIN_EXPORT_BUFFER_SIZE), buffer_offset(0) {}
 
     void open(const uint32_t root_id)
     {
-        constexpr uint64_t kFileBufferSize = DRAIN_EXPORT_BUFFER_SIZE * 4;
+        buffer_offset = 0;
         std::string file_name = temp_dir + "root_" + std::to_string(root_id) + ".bin";
-        out_file = std::fopen(file_name.c_str(), "wb+");
-        if (out_file == nullptr)
+        out_file = ::open(file_name.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (out_file < 0)
         {
             std::cerr << "failed to open final drain output file" << std::endl;
-            std::exit(-1);
-        }
-        if (std::setvbuf(out_file, nullptr, _IOFBF, kFileBufferSize) != 0)
-        {
-            std::fclose(out_file);
-            std::cerr << "failed to set buffer size for final drain output file" << std::endl;
             std::exit(-1);
         }
     }
 
     ~FinalDrainWriter()
     {
-        if (out_file != nullptr)
+        if (out_file != -1)
         {
-            std::fclose(out_file);
-            out_file = nullptr;
+            ::close(out_file);
+            out_file = -1;
         }
     }
 
     void close()
     {
-        if (out_file != nullptr)
+        if (out_file != -1)
         {
-            std::fclose(out_file);
-            out_file = nullptr;
+            if (buffer_offset > 0)
+            {
+                ::write(out_file, buffer.data(), buffer_offset);
+                buffer_offset = 0;
+            }
+            ::close(out_file);
+            out_file = -1;
         }
     }
 
@@ -63,7 +66,14 @@ public:
     std::size_t write(const T &kmer_info)
     {
         sorted_kmer_count.fetch_add(1, std::memory_order_relaxed);
-        return std::fwrite(reinterpret_cast<const void *>(&kmer_info), sizeof(T), 1, out_file);
+        if (sizeof(T) + buffer_offset > DRAIN_EXPORT_BUFFER_SIZE) [[unlikely]]
+        {
+            ::write(out_file, buffer.data(), buffer_offset);
+            buffer_offset = 0;
+        }
+        std::memcpy(buffer.data() + buffer_offset, &kmer_info, sizeof(T));
+        buffer_offset += sizeof(T);
+        return sizeof(T);
     }
 };
 
