@@ -149,7 +149,7 @@ public:
         stats.sampled_calls++;
 
         const uint64_t t0 = bloom_read_cycles();
-        XXH128_hash_t hash_res1 = XXH3_128bits(&k_mer, sizeof(k_mer));
+        //XXH128_hash_t hash_res1 = XXH3_128bits(&k_mer, sizeof(k_mer));
         const uint64_t t1 = bloom_read_cycles();
 
         uint64_t h1, h2;
@@ -206,7 +206,7 @@ public:
             done = second_done;
         }
 
-        stats.hash_cycles += t1 - t0;
+        stats.hash_cycles += t2 - t0;
         stats.index_mask_cycles += t2 - t1;
         stats.first_load_cycles += first_load_end - first_load_start;
         stats.first_filter_cycles += first_done - first_load_start;
