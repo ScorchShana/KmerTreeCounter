@@ -172,17 +172,22 @@ int main(int argc, char *argv[])
     {
         if (prefix_counts[i].load(std::memory_order_relaxed) > average_count * 4)
         {
+            
+            bloom_filter_capacity[bloom_index] = std::bit_ceil(std::max<uint64_t>(1, partition_prefix_sum / (average_count * 4)) * standard_bloom_filter_capacity);
             bloom_index++;
             prefix_hot[i] = 1;
+            bloom_filter_capacity[bloom_index] = std::bit_ceil(prefix_counts[i].load(std::memory_order_relaxed) / (average_count * 4) * standard_bloom_filter_capacity);
             prefix_to_bloom_index[i] = bloom_index++;
             partition_prefix_sum = 0;
             std::cout << std::format("Prefix {:0>8b} is hot with count = {}", i, prefix_counts[i].load(std::memory_order_relaxed)) << std::endl;
+            std::cout << std::bit_ceil(prefix_counts[i].load(std::memory_order_relaxed) / (average_count * 4)) << " times of standard bloom filter" << std::endl;
         }
         else
         {
             partition_prefix_sum += prefix_counts[i].load(std::memory_order_relaxed);
             if (partition_prefix_sum > average_count * 4)
             {
+                bloom_filter_capacity[bloom_index] = std::bit_ceil(partition_prefix_sum / (average_count * 4) * standard_bloom_filter_capacity);
                 prefix_to_bloom_index[i] = bloom_index++;
                 partition_prefix_sum = 0;
             }
@@ -193,6 +198,13 @@ int main(int argc, char *argv[])
 
             prefix_hot[i] = 0;
         }
+    }
+
+    if (partition_prefix_sum > 0)
+    {
+        const uint64_t threshold = average_count * 4;
+        const uint64_t partition_scale = (partition_prefix_sum + threshold - 1) / threshold;
+        bloom_filter_capacity[bloom_index] = std::bit_ceil(std::max<uint64_t>(1, partition_scale) * standard_bloom_filter_capacity);
     }
 
     std::cout << "Bloom filter partition count: " << bloom_index + 1 << std::endl;

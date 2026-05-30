@@ -156,13 +156,15 @@ alignas(CACHE_LINE_SIZE) inline std::atomic<uint64_t> sorted_kmer_count{0};
 // 临时文件目录
 inline std::string temp_dir = "./tmp/";
 
-inline uint64_t bloom_filter_capacity = 1ULL << 18; // Bloom Filter容量，单位为元素数量
+inline uint64_t standard_bloom_filter_capacity = 1ULL << 18; // Bloom Filter容量，单位为元素数量
 
 // 标记哪些前缀是热的
 inline std::array<uint8_t, 1U << (2 * ROOT_BASES)> prefix_hot;
 
 // 标记哪些冷门前缀合并到对应的布隆过滤器的Index
 inline std::array<uint8_t, 1U << (2 * ROOT_BASES)> prefix_to_bloom_index;
+
+inline std::array<uint64_t, 1U << (2 * ROOT_BASES)> bloom_filter_capacity; // 每个布隆过滤器的容量（元素数量）
 
 /*#ifdef TEST_MODE
 inline std::array<std::atomic<uint64_t>, 1ULL << (2 * ROOT_BASES)> root_counts{};

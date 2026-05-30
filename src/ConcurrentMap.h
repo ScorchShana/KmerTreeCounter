@@ -208,7 +208,8 @@ public:
         }
     }
 
-    void add_size(const uint64_t local_size_count){
+    void add_size(const uint64_t local_size_count)
+    {
         map_size.fetch_add(local_size_count, std::memory_order_relaxed);
     }
 
@@ -232,13 +233,13 @@ public:
         }
     }
 
-private:
     // 获取桶头指针
     inline std::atomic<concurrent_node<N> *> &bucket_head(const uint64_t index) const noexcept
     {
         return buckets[index].head;
     };
 
+private:
     // 从线程本地 handle 分配节点
     [[nodiscard]] inline concurrent_node<N> *allocate_node()
     {

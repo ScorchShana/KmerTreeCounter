@@ -115,17 +115,18 @@ public:
         {
             if (last_bloom_filter == nullptr || prefix_to_bloom_index[i] != last_bloom_index)
             {
-                if (prefix_hot[i])
-                {
-                    root_bloom_filters[i] = new ConcurrentDoubleBloomFilter<N>(bloom_filter_capacity * 2ULL, memory_pool);
-                }
-                else
-                {
-                    root_bloom_filters[i] = new ConcurrentDoubleBloomFilter<N>(bloom_filter_capacity, memory_pool);
-                }
-
+                // if (prefix_hot[i])
+                // {
+                //     root_bloom_filters[i] = new ConcurrentDoubleBloomFilter<N>(bloom_filter_capacity * 2ULL, memory_pool);
+                // }
+                // else
+                // {
+                //     root_bloom_filters[i] = new ConcurrentDoubleBloomFilter<N>(bloom_filter_capacity, memory_pool);
+                // }
+                const int cur_bloom_index = prefix_to_bloom_index[i];
+                root_bloom_filters[i] = new ConcurrentDoubleBloomFilter<N>(bloom_filter_capacity[cur_bloom_index], memory_pool);
                 last_bloom_filter = root_bloom_filters[i];
-                last_bloom_index = prefix_to_bloom_index[i];
+                last_bloom_index = cur_bloom_index;
             }
             else
             {
@@ -151,7 +152,7 @@ public:
         ConcurrentDoubleBloomFilter<N> *last_bloom_filter = nullptr;
         for (uint64_t i = 0; i < root_bloom_filters.size(); ++i)
         {
-            if (last_bloom_filter != nullptr && prefix_to_bloom_index[i] != last_bloom_index)
+            if (prefix_to_bloom_index[i] != last_bloom_index)
             {
 
                 last_bloom_filter = root_bloom_filters[i];
@@ -840,7 +841,8 @@ private:
             {
                 if (current->count > 0)
                 {
-                    if (current->hash_map.load(std::memory_order_acquire) != nullptr)
+                    ConcurrentMap<N> *hash_map = current->hash_map.load(std::memory_order_acquire);
+                    if (hash_map != nullptr)
                     {
                         // Full node: already has frequency-counting infrastructure
                         Task<N> task;
@@ -851,6 +853,7 @@ private:
                         insert_kmer_in_task_to_node_hash_map(task);
                         current->count = 0;
                         current->active_block = nullptr;
+                        export_hash_map(writer, hash_map);
                     }
                     else
                     {
@@ -1281,6 +1284,24 @@ private:
 
         leaf->count = 0;
         leaf->active_block = nullptr;
+    }
+
+    void export_hash_map(FinalDrainWriter &writer, ConcurrentMap<N> *hash_map)
+    {
+        for (uint64_t i = 0; i < kmer_concurrent_hash_map_capacity; i++)
+        {
+            auto node_ptr = hash_map->bucket_head(i).load(std::memory_order_relaxed);
+            if (node_ptr != nullptr)
+            {
+                __builtin_prefetch(node_ptr, 0, 0);
+                while (node_ptr != nullptr)
+                {
+                    append_export_record(writer, node_ptr->k_mer, node_ptr->count.load(std::memory_order_relaxed));
+                    node_ptr = node_ptr->next;
+                    __builtin_prefetch(node_ptr, 0, 0);
+                }
+            }
+        }
     }
 
     void ensure_spare_block()

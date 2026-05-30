@@ -153,7 +153,7 @@ public:
         enqueue_content_to_export_writer({reinterpret_cast<char *>(export_block_ptr), export_kmer_block_count});
         export_kmer_block_count = 0;
 
-        tree->flush_local_root_nodes(local_root_nodes,rng());
+        tree->flush_local_root_nodes(local_root_nodes.data(),rng());
     }
 
 private:
