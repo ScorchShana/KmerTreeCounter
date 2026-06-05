@@ -226,6 +226,11 @@ public:
         ring_memory_pool_ptr_->producer_set_finished();
     }
 
+    uint64_t get_file_size() const noexcept
+    {
+        return file_size_;
+    }
+
 private:
     State advance_state_on_newline(const State current) const
     {

@@ -44,9 +44,9 @@ class FastqReader
     uint64_t chunk_size_;
     std::string filename_;
     SPMCRingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY> *ring_memory_pool_ptr_;
-    char *file_buffer; // 预留给读缓冲参数，保持接口兼容
-    char left_buffer_[128];                // 块在碱基行中间截断时，保存最后(k-1)个碱基用于下块前缀
-    size_t left_buffer_size_ = 0;          // left_buffer_中有效碱基字节数
+    char *file_buffer;            // 预留给读缓冲参数，保持接口兼容
+    char left_buffer_[128];       // 块在碱基行中间截断时，保存最后(k-1)个碱基用于下块前缀
+    size_t left_buffer_size_ = 0; // left_buffer_中有效碱基字节数
 
 public:
 #ifdef TEST_MODE
@@ -58,8 +58,7 @@ public:
     int k;
 
     explicit FastqReader(const std::string &filename, const int in_k, uint64_t chunk_size, SPMCRingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY> *in_ring_memory_pool_ptr)
-        : total_dequeue_spin_time(0), total_enqueue_spin_time(0), aio_wait_spin_time(0),
-          acbs_index(0), filename_(filename), ring_memory_pool_ptr_(in_ring_memory_pool_ptr),
+        : acbs_index(0), filename_(filename), ring_memory_pool_ptr_(in_ring_memory_pool_ptr),
           k(in_k), chunk_size_(chunk_size)
     {
         assert(ring_memory_pool_ptr_ != nullptr && "SPMCRingMemoryPool pointer must not be null");
@@ -97,7 +96,6 @@ public:
             std::cerr << "Failed to allocate aligned memory for file buffer: " << std::endl;
             std::exit(-1);
         }
-
     }
 
     ~FastqReader()
@@ -106,7 +104,7 @@ public:
         {
             ::close(fd_);
         }
-        if(file_buffer)
+        if (file_buffer)
         {
             std::free(file_buffer);
         }
@@ -287,7 +285,6 @@ private:
         //     spin_time++;
         // }
         ring_memory_pool_ptr_->producer_dequeue(block_ptr);
-
 
         has_block = true;
         write_size = 0;

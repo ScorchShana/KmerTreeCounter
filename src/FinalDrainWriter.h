@@ -18,6 +18,7 @@ private:
     int out_file = -1;
     std::vector<char> buffer;
     int buffer_offset = 0;
+    uint64_t local_sorted_kmer_count = 0;
 
 public:
     FinalDrainWriter(const FinalDrainWriter &) = delete;
@@ -25,7 +26,7 @@ public:
     FinalDrainWriter(FinalDrainWriter &&) = delete;
     FinalDrainWriter &operator=(FinalDrainWriter &&) = delete;
 
-    explicit FinalDrainWriter() : out_file(-1), buffer(DRAIN_EXPORT_BUFFER_SIZE), buffer_offset(0) {}
+    explicit FinalDrainWriter() : out_file(-1), buffer(DRAIN_EXPORT_BUFFER_SIZE), buffer_offset(0), local_sorted_kmer_count(0) {}
 
     void open(const uint32_t root_id)
     {
@@ -46,6 +47,11 @@ public:
             ::close(out_file);
             out_file = -1;
         }
+        if(local_sorted_kmer_count > 0)
+        {
+            sorted_kmer_count.fetch_add(local_sorted_kmer_count, std::memory_order_relaxed);
+            local_sorted_kmer_count = 0;
+        }
     }
 
     void close()
@@ -60,12 +66,15 @@ public:
             ::close(out_file);
             out_file = -1;
         }
+        sorted_kmer_count.fetch_add(local_sorted_kmer_count, std::memory_order_relaxed);
+        local_sorted_kmer_count = 0;
     }
 
     template <typename T>
     std::size_t write(const T &kmer_info)
     {
-        sorted_kmer_count.fetch_add(1, std::memory_order_relaxed);
+        //sorted_kmer_count.fetch_add(1, std::memory_order_relaxed);
+        local_sorted_kmer_count++;
         if (sizeof(T) + buffer_offset > DRAIN_EXPORT_BUFFER_SIZE) [[unlikely]]
         {
             ::write(out_file, buffer.data(), buffer_offset);

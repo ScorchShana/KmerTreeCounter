@@ -7,11 +7,13 @@
 #include "NewKmerTree.h"
 #include "BloomFilter.h"
 #include "SplitMix.h"
+#include "MPSCRingQueue.h"
 
 #include <array>
 #include <cstdint>
 #include <bitset>
 #include <cstdlib>
+#include <vector>
 
 template <uint32_t N>
 class FastqClassifier
@@ -22,47 +24,54 @@ class FastqClassifier
     static constexpr int MAX_BACKOFF = 64;
 
     static constexpr uint64_t EXPORT_KMER_BLOCK_CAPACITY = EXPORT_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>);
+    static constexpr uint32_t BLOOM_PREFETCH_DISTANCE = 64;
 
     int k_len;
-    RingMemoryPool<PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY> *parser_classifier_ring_pool;
-    KmerTree<N> *tree;
+    uint32_t classifier_index;
+    RingMemoryPool<PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY>* parser_classifier_ring_pool;
+    std::shared_ptr<MPSCRingQueue<content_type, CLASSIFIER_TASK_QUEUES_CAPACITY>> classify_task_queue;
+    KmerTree<N>* tree;
 
     std::array<node<N>, 1ULL << (2 * ROOT_BASES)> local_root_nodes{};
+    std::array<uint8_t, 1ULL << (2 * ROOT_BASES)> prefix_to_bloom_filter_index{};
 
     std::array<uint32_t, 1ULL << (2 * ROOT_BASES)> local_block_prefix_counts{};
     std::array<uint32_t, 1ULL << (2 * ROOT_BASES)> local_block_prefix_sums{};
 
     std::array<kmer<N>, PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)> local_block_for_copy{};
-    std::bitset<PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)> local_block_export_bitmap{};
 
-    ExportBlock<N> *export_block_ptr = nullptr;
+    ExportBlock<N>* export_block_ptr = nullptr;
     uint64_t export_kmer_block_count = 0;
 
-    SplitMix64 rng; // 用于模拟 Bloom Filter 的随机行为
+    std::vector<BloomFilter<N>> local_bloom_filters;
+
+    SplitMix64 rng;
 
 public:
 #ifdef TEST_MODE
-    uint64_t producer_enqueue_spin_time{0};
-    uint64_t producer_dequeue_spin_time{0};
-    uint64_t consumer_enqueue_spin_time{0};
-    uint64_t consumer_dequeue_spin_time{0};
+    uint64_t producer_enqueue_spin_time{ 0 };
+    uint64_t producer_dequeue_spin_time{ 0 };
+    uint64_t consumer_enqueue_spin_time{ 0 };
+    uint64_t consumer_dequeue_spin_time{ 0 };
     bool not_first_flag = false;
-
-    BloomTimingStats bloom_timing_stats;
-    uint64_t classifier_processed_kmers = 0;
-    uint64_t prefix_count_cycles = 0;
-    uint64_t prefix_reorder_cycles = 0;
-    uint64_t classify_local_block_cycles = 0;
-    uint64_t tree_add_cycles = 0;
 #endif
 
-    explicit FastqClassifier(uint32_t in_k_len, RingMemoryPool<PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY> *in_ring_pool, KmerTree<N> *in_tree)
-        : k_len(in_k_len), parser_classifier_ring_pool(in_ring_pool), tree(in_tree),
-          export_block_ptr(nullptr), export_kmer_block_count(0)
+    explicit FastqClassifier(uint32_t in_k_len, uint32_t in_classifier_index, RingMemoryPool<PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY>* in_ring_pool, std::shared_ptr<MPSCRingQueue<content_type, CLASSIFIER_TASK_QUEUES_CAPACITY>> in_classify_task_queue, KmerTree<N>* in_tree)
+        : k_len(in_k_len), classifier_index(in_classifier_index), parser_classifier_ring_pool(in_ring_pool), classify_task_queue(in_classify_task_queue), tree(in_tree),
+        export_block_ptr(nullptr), export_kmer_block_count(0)
     {
-        char *raw_block_ptr = nullptr;
+        char* raw_block_ptr = nullptr;
         dequeue_data_to_export_writer(raw_block_ptr);
         export_block_ptr = reinterpret_cast<ExportBlock<N> *>(raw_block_ptr);
+
+        for (uint64_t i = 0; i < (1ULL << (2 * ROOT_BASES)); i++)
+        {
+            if (prefix_owners[i] == classifier_index)
+            {
+                local_bloom_filters.emplace_back(bloom_filter_capacity[i]);
+                prefix_to_bloom_filter_index[i] = local_bloom_filters.size() - 1;
+            }
+        }
     }
 
     ~FastqClassifier()
@@ -80,7 +89,7 @@ public:
         while (not_empty || !parser_classifier_ring_pool->producer_finished())
         {
 
-            not_empty = parser_classifier_ring_pool->consumer_try_dequeue(content);
+            not_empty = classify_task_queue->try_dequeue(content);
             if (not_empty)
             {
 
@@ -88,7 +97,7 @@ public:
                 not_first_flag = true;
 #endif
 
-                kmer<N> *kmer_data = reinterpret_cast<kmer<N> *>(content.data);
+                kmer<N>* kmer_data = reinterpret_cast<kmer<N> *>(content.data);
                 const uint64_t kmer_count = content.length; // length 就是 k-mer数量
                 process_block(kmer_data, kmer_count);
 
@@ -150,39 +159,21 @@ public:
             }
         }
 
-        enqueue_content_to_export_writer({reinterpret_cast<char *>(export_block_ptr), export_kmer_block_count});
+        enqueue_content_to_export_writer({ reinterpret_cast<char*>(export_block_ptr), export_kmer_block_count });
         export_kmer_block_count = 0;
 
-        tree->flush_local_root_nodes(local_root_nodes.data(),rng());
+        tree->flush_local_root_nodes(local_root_nodes.data(), rng());
     }
 
 private:
-    void process_block(kmer<N> *kmer_data, const uint64_t kmer_count)
+    void process_block(kmer<N>* kmer_data, const uint64_t kmer_count)
     {
-#ifdef TEST_MODE
-        const uint64_t t0 = bloom_read_cycles();
-#endif
         calculate_block_prefix_counts(kmer_data, kmer_count);
-#ifdef TEST_MODE
-        const uint64_t t1 = bloom_read_cycles();
-#endif
         push_kmers_into_local_block_for_copy(kmer_data, kmer_count);
-#ifdef TEST_MODE
-        const uint64_t t2 = bloom_read_cycles();
-#endif
-        // std::memcpy(local_block_for_copy.data(), kmer_data, kmer_count * sizeof(kmer<N>));
         classify_local_block(kmer_count);
-#ifdef TEST_MODE
-        const uint64_t t3 = bloom_read_cycles();
-
-        classifier_processed_kmers += kmer_count;
-        prefix_count_cycles += t1 - t0;
-        prefix_reorder_cycles += t2 - t1;
-        classify_local_block_cycles += t3 - t2;
-#endif
     }
 
-    void calculate_block_prefix_counts(kmer<N> *kmer_data, const uint64_t kmer_count)
+    void calculate_block_prefix_counts(kmer<N>* kmer_data, const uint64_t kmer_count)
     {
 
         memset(local_block_prefix_counts.data(), 0, local_block_prefix_counts.size() * sizeof(uint32_t));
@@ -201,7 +192,7 @@ private:
         }
     }
 
-    void push_kmers_into_local_block_for_copy(kmer<N> *kmer_data, const uint64_t kmer_count)
+    void push_kmers_into_local_block_for_copy(kmer<N>* kmer_data, const uint64_t kmer_count)
     {
         for (uint64_t index = 0; index < kmer_count; index++)
         {
@@ -214,13 +205,8 @@ private:
 
     void classify_local_block(const uint64_t kmer_count) noexcept
     {
-        // char *raw_block_ptr = nullptr;
-        // dequeue_data_to_export_writer(raw_block_ptr);
+
         uint64_t local_block_count = 0;
-
-        kmer<N> last_kmer;
-
-        // local_block_export_bitmap.reset();
 
         uint64_t read_offset = 0;
         for (uint64_t prefix = 0; prefix < local_block_prefix_counts.size(); prefix++)
@@ -233,78 +219,109 @@ private:
 
             uint32_t prefix_export_count = 0;
 
-            ConcurrentDoubleBloomFilter<N> *bloom_filter = tree->get_root_bloom_filter(prefix);
+            const uint32_t bloom_filter_index = prefix_to_bloom_filter_index[prefix];
 
-            //__builtin_prefetch(bloom_filter->get_filter_bins(), 1, 1);
+            BloomFilter<N>& bloom_filter = local_bloom_filters[bloom_filter_index];
+
+            if (prefix_count < BLOOM_PREFETCH_DISTANCE / 2) [[unlikely]]
+            {
+                for (uint32_t i = 0; i < prefix_count; ++i)
+                {
+                    const kmer<N>& val = local_block_for_copy[read_offset];
+
+                    if (bloom_filter.insert(val))
+                    {
+                        export_block_ptr->k_mers[export_kmer_block_count++] = val;
+                        prefix_export_count++;
+
+                        if (export_kmer_block_count == EXPORT_KMER_BLOCK_CAPACITY) [[unlikely]]
+                        {
+                            enqueue_content_to_export_writer({ reinterpret_cast<char*>(export_block_ptr), export_kmer_block_count });
+                            export_kmer_block_count = 0;
+                            char* raw_block_ptr = nullptr;
+                            dequeue_data_to_export_writer(raw_block_ptr);
+                            export_block_ptr = reinterpret_cast<ExportBlock<N> *>(raw_block_ptr);
+                        }
+                    }
+                    else
+                    {
+                        local_block_for_copy[local_block_count++] = val;
+                    }
+
+                    read_offset++;
+                }
+
+                local_block_prefix_counts[prefix] -= prefix_export_count;
+                continue;
+            }
+
+            std::array<typename BloomFilter<N>::InsertProbe, BLOOM_PREFETCH_DISTANCE> probes;
+            const uint64_t prefix_begin = read_offset;
+            const uint32_t warmup_count = (prefix_count < BLOOM_PREFETCH_DISTANCE) ? prefix_count : BLOOM_PREFETCH_DISTANCE;
+
+            for (uint32_t i = 0; i < warmup_count; ++i)
+            {
+                const uint64_t idx = prefix_begin + i;
+                probes[i] = bloom_filter.prepare_insert(local_block_for_copy[idx]);
+                bloom_filter.prefetch_insert(probes[i]);
+            }
 
             for (uint32_t i = 0; i < prefix_count; ++i)
             {
-                const kmer<N> &val = local_block_for_copy[read_offset];
+                const uint32_t slot = i % BLOOM_PREFETCH_DISTANCE;
+                const uint64_t idx = prefix_begin + i;
+                const kmer<N>& val = local_block_for_copy[idx];
 
-#ifdef TEST_MODE
-                if (bloom_filter->insert_timed(val, bloom_timing_stats))
-#else
-                if (bloom_filter->insert(val))
-#endif
-                // if (rng() % 100 < 30)
+                const bool is_first = bloom_filter.insert_prepared(probes[slot]);
+
+                const uint32_t next_i = i + BLOOM_PREFETCH_DISTANCE;
+                if (next_i < prefix_count)
                 {
-                    // local_block_export_bitmap.set(read_offset);
-                    export_block_ptr->k_mers[export_kmer_block_count++] = local_block_for_copy[read_offset];
+                    const uint64_t next_idx = prefix_begin + next_i;
+                    probes[slot] = bloom_filter.prepare_insert(local_block_for_copy[next_idx]);
+                    bloom_filter.prefetch_insert(probes[slot]);
+                }
+
+                if (is_first)
+                {
+                    export_block_ptr->k_mers[export_kmer_block_count++] = val;
                     prefix_export_count++;
 
                     if (export_kmer_block_count == EXPORT_KMER_BLOCK_CAPACITY) [[unlikely]]
                     {
-                        enqueue_content_to_export_writer({reinterpret_cast<char *>(export_block_ptr), export_kmer_block_count});
+                        enqueue_content_to_export_writer({ reinterpret_cast<char*>(export_block_ptr), export_kmer_block_count });
                         export_kmer_block_count = 0;
-                        char *raw_block_ptr = nullptr;
+                        char* raw_block_ptr = nullptr;
                         dequeue_data_to_export_writer(raw_block_ptr);
                         export_block_ptr = reinterpret_cast<ExportBlock<N> *>(raw_block_ptr);
                     }
                 }
                 else
                 {
-                    local_block_for_copy[local_block_count++] = local_block_for_copy[read_offset];
+                    local_block_for_copy[local_block_count++] = val;
                 }
-
-                read_offset++;
             }
 
+            read_offset += prefix_count;
             local_block_prefix_counts[prefix] -= prefix_export_count;
         }
 
-        // for (uint64_t i = 0; i < kmer_count; ++i)
-        // {
-        //     if (!local_block_export_bitmap.test(i))
-        //     {
-        //         local_block_for_copy[local_block_count++] = local_block_for_copy[i];
-        //     }
-        // }
-
-        // enqueue_content_to_export_writer({raw_block_ptr, export_kmer_block_count});
-        // export_pool->producer_enqueue({raw_block_ptr, export_kmer_count});
-
         if (local_block_count > 0) [[likely]]
         {
-#ifdef TEST_MODE
-            const uint64_t tree_add_t0 = bloom_read_cycles();
-#endif
+
             tree->main_add_kmer_block_with_local_root_nodes(local_block_for_copy, local_block_prefix_counts, local_root_nodes.data());
-#ifdef TEST_MODE
-            const uint64_t tree_add_t1 = bloom_read_cycles();
-            tree_add_cycles += tree_add_t1 - tree_add_t0;
-#endif
         }
     }
 
-    uint64_t get_root_prefix(const kmer<N> &k_mer) const
+    uint64_t get_root_prefix(const kmer<N>& k_mer) const
     {
         constexpr uint32_t shift_bits = 64 - (ROOT_BASES * 2);
         return k_mer.data[0] >> shift_bits;
     }
 
-    void enqueue_content_to_export_writer(const content_type &content)
+    void enqueue_content_to_export_writer(const content_type& content)
     {
-        RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY> *export_pool = tree->get_export_ring_pool();
+        RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY>* export_pool = tree->get_export_ring_pool();
         int backoff_iterations = 1;
         int spin_count = 0;
 
@@ -334,9 +351,9 @@ private:
         }
     }
 
-    void dequeue_data_to_export_writer(char *&data)
+    void dequeue_data_to_export_writer(char*& data)
     {
-        RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY> *export_pool = tree->get_export_ring_pool();
+        RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY>* export_pool = tree->get_export_ring_pool();
         int backoff_iterations = 1;
         int spin_count = 0;
 

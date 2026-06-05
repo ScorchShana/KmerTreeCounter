@@ -10,6 +10,7 @@
 #include "FastqPrefixCounter.h"
 #include "FastqPreReader.h"
 #include "FastqParser.h"
+#include "FastqPreParser.h"
 
 #include <chrono>
 #include <iostream>
@@ -23,18 +24,95 @@
 #include <thread>
 #include <algorithm>
 #include <bit>
+#include <queue>
+#include <functional>
+#include <bitset>
+#include <atomic>
 
 uint32_t k_len;        // k-mer 的长度 (例如: 31, 41)
 uint32_t n_thread;     // 允许使用的总线程数
 uint64_t memory_limit; // 全局最大内存限制，单位为 GB
+uint64_t file_size;    // 输入 FASTQ 文件的大小，单位为字节
 
-int main(int argc, char *argv[])
+void lpt(std::vector<std::atomic<uint32_t>>& prefix_counts, uint32_t classifier_num)
+{
+    struct PrefixInfo
+    {
+        uint64_t prefix;
+        uint32_t count;
+    };
+
+    PrefixInfo prefix_info_array[1ULL << (2 * ROOT_BASES)];
+    for (uint64_t i = 0; i < prefix_counts.size(); i++)
+    {
+        prefix_info_array[i].prefix = i;
+        prefix_info_array[i].count = prefix_counts[i].load(std::memory_order_relaxed);
+    }
+
+    std::sort(prefix_info_array, prefix_info_array + (1ULL << (2 * ROOT_BASES)), [](const PrefixInfo& a, const PrefixInfo& b)
+        { return a.count > b.count; });
+
+    struct ClassifierWorkload
+    {
+        uint32_t classifier_index;
+        uint32_t count;
+
+        bool operator<(const ClassifierWorkload& other) const
+        {
+            return count > other.count; // 负载较轻的前缀优先分配
+        }
+    };
+    std::priority_queue<ClassifierWorkload, std::vector<ClassifierWorkload>> classifier_workloads;
+    for (uint32_t i = 0; i < classifier_num; i++)
+    {
+        classifier_workloads.push({ i, 0 });
+    }
+
+    for (uint64_t i = 0; i < (1ULL << (2 * ROOT_BASES)); i++)
+    {
+        ClassifierWorkload work_load = classifier_workloads.top();
+        prefix_owners[prefix_info_array[i].prefix] = work_load.classifier_index;
+        classifier_workloads.pop();
+        work_load.count += prefix_info_array[i].count;
+        classifier_workloads.push(work_load);
+    }
+    while (!classifier_workloads.empty())
+    {
+        ClassifierWorkload work_load = classifier_workloads.top();
+        std::cout << "Classifier " << work_load.classifier_index << " total prefix count: " << work_load.count << std::endl;
+        classifier_workloads.pop();
+    }
+}
+
+void calculate_bloom_filter_capacity(std::vector<std::atomic<uint32_t>>& prefix_counts, uint64_t file_size)
+{
+    const uint64_t estimated_total_kmers = file_size / 3;
+    uint64_t total_prefix_count = 0;
+
+    uint64_t max_bloom_filter_capacity = 0;
+
+    for (uint64_t i = 0; i < prefix_counts.size(); i++)
+    {
+        total_prefix_count += prefix_counts[i].load(std::memory_order_relaxed);
+    }
+
+    for (uint64_t i = 0; i < bloom_filter_capacity.size(); i++)
+    {
+        double prefix_ratio = static_cast<double>(prefix_counts[i].load(std::memory_order_relaxed)) / total_prefix_count;
+        const uint64_t estimated_capacity = static_cast<uint64_t>(estimated_total_kmers * prefix_ratio * 4.81 / 64);
+        bloom_filter_capacity[i] = std::max(std::bit_ceil(estimated_capacity), standard_bloom_filter_capacity);
+        max_bloom_filter_capacity = std::max(max_bloom_filter_capacity, bloom_filter_capacity[i]);
+    }
+    std::cout << "Max Bloom Filter capacity: " << max_bloom_filter_capacity << std::endl;
+}
+
+int main(int argc, char* argv[])
 {
 
     if (argc < 5 || argc > 9)
     {
         std::cerr << "Usage: " << argv[0]
-                  << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> [map_capacity] [min_count] [max_count] [parser_threads]" << std::endl;
+            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> [map_capacity] [min_count] [max_count] [parser_threads]" << std::endl;
         return 1;
     }
     bool enable_prefault = false;
@@ -78,17 +156,17 @@ int main(int argc, char *argv[])
         std::cout << "  Min count: " << min_count << std::endl;
         std::cout << "  Max count: " << max_count << std::endl;
     }
-    catch (const std::exception &)
+    catch (const std::exception&)
     {
         std::cerr << "Usage: " << argv[0]
-                  << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> [map_capacity] [min_count] [max_count] [parser_threads]" << std::endl;
+            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> [map_capacity] [min_count] [max_count] [parser_threads]" << std::endl;
         return 1;
     }
 
     if (kmer_concurrent_hash_map_capacity <= 1 || kmer_concurrent_hash_map_capacity >= 16ULL * 1024 * 1024 || max_count < min_count)
     {
         std::cerr << "Usage: " << argv[0]
-                  << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> [map_capacity] [min_count] [max_count] [parser_threads]" << std::endl;
+            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> [map_capacity] [min_count] [max_count] [parser_threads]" << std::endl;
         return 1;
     }
 
@@ -96,7 +174,7 @@ int main(int argc, char *argv[])
 
     // 根据预算计算分给 Worker 的解析(Parser)线程和任务(Tasker)线程的数量
     // Worker 预算去除了主线程(Reader)和导出线程(ExportWriter)
-    const uint32_t parser_num = (n_thread / 8 > 0) ? (n_thread / 8) : 1; // 预留至少 1 个线程给 Parser，剩余线程在 Parser 和 Tasker 之间分配
+    const uint32_t parser_num = (n_thread / 6 > 0) ? (n_thread / 6) : 1; // 预留至少 1 个线程给 Parser，剩余线程在 Parser 和 Tasker 之间分配
     const uint32_t worker_budget = n_thread - 2 - parser_num;
     const uint32_t classifier_num = (worker_budget / (1.0 + TASK_CLASSIFIER_RATIO) == 0) ? 1 : (uint32_t)(worker_budget / (1.0 + TASK_CLASSIFIER_RATIO));
     const uint32_t tasker_num = worker_budget - classifier_num;
@@ -121,14 +199,15 @@ int main(int argc, char *argv[])
 
     // PreRead阶段
     FastqPreReader<N1> pre_reader(filename, k_len, FASTQ_FILE_CHUNK_SIZE, reader_parser_ring_pool.get());
+    file_size = pre_reader.get_file_size();
     auto pre_parser_thread = std::thread([&]
-                                         {
-        FastqParser<N1> parser(k_len, reader_parser_ring_pool.get(), parser_classifier_ring_pool.get());
-        parser.parse_and_push();
-        parser_classifier_ring_pool->producer_set_finished(); });
+        {
+            FastqPreParser<N1> parser(k_len, reader_parser_ring_pool.get(), parser_classifier_ring_pool.get());
+            parser.parse_and_push();
+            parser_classifier_ring_pool->producer_set_finished(); });
 
     std::vector<std::atomic<uint32_t>> prefix_counts(1U << (2 * ROOT_BASES)); // 256 个前缀的计数器
-    for (auto &v : prefix_counts)
+    for (auto& v : prefix_counts)
     {
         v.store(0); // 或 v.store(init_value);
     }
@@ -137,17 +216,17 @@ int main(int argc, char *argv[])
     for (uint32_t i = 0; i < prefix_counter_thread_num; ++i)
     {
         prefix_counter_threads.emplace_back([&]
-                                            {
-            FastqPrefixCounter<N1> prefix_counter(k_len, parser_classifier_ring_pool.get());
-            prefix_counter.count_prefixes();
-            for(size_t j = 0; j < prefix_counts.size(); j++)
             {
-                prefix_counts[j].fetch_add(prefix_counter.prefix_counts[j], std::memory_order_relaxed);
-            } });
+                FastqPrefixCounter<N1> prefix_counter(k_len, parser_classifier_ring_pool.get());
+                prefix_counter.count_prefixes();
+                for (size_t j = 0; j < prefix_counts.size(); j++)
+                {
+                    prefix_counts[j].fetch_add(prefix_counter.prefix_counts[j], std::memory_order_relaxed);
+                } });
     }
     pre_reader.pre_read();
     pre_parser_thread.join();
-    for (auto &t : prefix_counter_threads)
+    for (auto& t : prefix_counter_threads)
     {
         t.join();
     }
@@ -163,61 +242,27 @@ int main(int argc, char *argv[])
         average_count += prefix_counts[i].load(std::memory_order_relaxed);
         // std::cout << std::format("Prefix {:0>8b}: count = {}", i, prefix_counts[i].load()) << std::endl;
     }
+
     average_count /= prefix_counts.size();
     std::cout << "Average prefix count: " << average_count << std::endl;
 
-    uint8_t bloom_index = 0;
-    uint64_t partition_prefix_sum = 0;
-    for (uint64_t i = 0; i < prefix_counts.size(); i++)
-    {
-        if (prefix_counts[i].load(std::memory_order_relaxed) > average_count * 4)
-        {
-            
-            bloom_filter_capacity[bloom_index] = std::bit_ceil(std::max<uint64_t>(1, partition_prefix_sum / (average_count * 4)) * standard_bloom_filter_capacity);
-            bloom_index++;
-            prefix_hot[i] = 1;
-            bloom_filter_capacity[bloom_index] = std::bit_ceil(prefix_counts[i].load(std::memory_order_relaxed) / (average_count * 4) * standard_bloom_filter_capacity);
-            prefix_to_bloom_index[i] = bloom_index++;
-            partition_prefix_sum = 0;
-            std::cout << std::format("Prefix {:0>8b} is hot with count = {}", i, prefix_counts[i].load(std::memory_order_relaxed)) << std::endl;
-            std::cout << std::bit_ceil(prefix_counts[i].load(std::memory_order_relaxed) / (average_count * 4)) << " times of standard bloom filter" << std::endl;
-        }
-        else
-        {
-            partition_prefix_sum += prefix_counts[i].load(std::memory_order_relaxed);
-            if (partition_prefix_sum > average_count * 4)
-            {
-                bloom_filter_capacity[bloom_index] = std::bit_ceil(partition_prefix_sum / (average_count * 4) * standard_bloom_filter_capacity);
-                prefix_to_bloom_index[i] = bloom_index++;
-                partition_prefix_sum = 0;
-            }
-            else
-            {
-                prefix_to_bloom_index[i] = bloom_index;
-            }
-
-            prefix_hot[i] = 0;
-        }
-    }
-
-    if (partition_prefix_sum > 0)
-    {
-        const uint64_t threshold = average_count * 4;
-        const uint64_t partition_scale = (partition_prefix_sum + threshold - 1) / threshold;
-        bloom_filter_capacity[bloom_index] = std::bit_ceil(std::max<uint64_t>(1, partition_scale) * standard_bloom_filter_capacity);
-    }
-
-    std::cout << "Bloom filter partition count: " << bloom_index + 1 << std::endl;
+    lpt(prefix_counts, classifier_num);
+    calculate_bloom_filter_capacity(prefix_counts, file_size);
 
     // 初始化 k-mer 字典树(KmerTree)的核心结构，整合前述多个组件
     auto tree = std::make_shared<KmerTree<N1>>(k_len, pool.get(), layer_queues.get(), export_ring_pool.get());
-
+    // 初始化布隆过滤器的MPSC队列
+    std::vector<std::shared_ptr<MPSCRingQueue<content_type, CLASSIFIER_TASK_QUEUES_CAPACITY>>> classifier_task_queues;
+    for (uint32_t i = 0; i < classifier_num; i++)
+    {
+        classifier_task_queues.push_back(std::make_shared<MPSCRingQueue<content_type, CLASSIFIER_TASK_QUEUES_CAPACITY>>());
+    }
     // 初始化并构建 Tasker 线程池，负责消费层级队列并将 k-mer 路由到深层节点 / 哈希表
     auto task_thread_pool = std::make_shared<SchedulerThreadPool<N1>>(tasker_num, classifier_num, tree.get(), layer_queues.get());
     // 初始化并构建 Parser 线程池，负责消费 FASTQ 读取器产生的数据，提取 k-mer 进行初步布隆过滤
-    auto parser_thread_pool = std::make_shared<ParserThreadPool<N1>>(k_len, pool.get(), reader_parser_ring_pool.get(), parser_classifier_ring_pool.get(), parser_num);
+    auto parser_thread_pool = std::make_shared<ParserThreadPool<N1>>(k_len, classifier_task_queues, pool.get(), reader_parser_ring_pool.get(), parser_classifier_ring_pool.get(), parser_num);
     // 初始化并且构建 Classifier 线程池，负责消费 Parser 线程产生的 k-mer 数据块，进行更精细的分类和路由
-    auto classifier_thread_pool = std::make_shared<ClassifierThreadPool<N1>>(k_len, tree.get(), parser_classifier_ring_pool.get(), task_thread_pool.get(), classifier_num);
+    auto classifier_thread_pool = std::make_shared<ClassifierThreadPool<N1>>(k_len, tree.get(), parser_classifier_ring_pool.get(), classifier_task_queues, task_thread_pool.get(), classifier_num);
 
     // 初始化导出写入器，用于将低频 k-mer 单线程安全落盘
     auto export_writer = std::make_shared<ExportWriter<N1>>(export_ring_pool.get());
@@ -308,71 +353,19 @@ int main(int argc, char *argv[])
     std::cout << "Parser producer dequeue total spin time: " << parser_thread_pool->producer_dequeue_spin_time.load() << std::endl;
     std::cout << "Parser consumer dequeue total spin time: " << parser_thread_pool->consumer_dequeue_spin_time.load() << std::endl;
     std::cout << "Parser consumer enqueue total spin time: " << parser_thread_pool->consumer_enqueue_spin_time.load() << std::endl;
+    std::cout << "Parser total parse cycles: " << parser_thread_pool->total_parse_cycles.load() << std::endl;
+    std::cout << "Parser total flush cycles: " << parser_thread_pool->total_flush_cycles.load() << std::endl;
+    std::cout << "Parser total queue wait cycles: " << parser_thread_pool->total_queue_wait_cycles.load() << std::endl;
+    std::cout << "Parser total flush cycles account for " << (double)parser_thread_pool->total_flush_cycles.load() / parser_thread_pool->total_parse_cycles.load() * 100 << "% of parse cycles" << std::endl;
+    std::cout << "Parser total queue wait cycles account for " << (double)parser_thread_pool->total_queue_wait_cycles.load() / parser_thread_pool->total_parse_cycles.load() * 100 << "% of parse cycles" << std::endl;
     std::cout << "Classifier consumer dequeue total spin time: " << classifier_thread_pool->consumer_dequeue_spin_time.load() << std::endl;
     std::cout << "Classifier consumer enqueue total spin time: " << classifier_thread_pool->consumer_enqueue_spin_time.load() << std::endl;
     std::cout << "Classifier producer enqueue total spin time: " << classifier_thread_pool->producer_enqueue_spin_time.load() << std::endl;
     std::cout << "Classifier producer dequeue total spin time: " << classifier_thread_pool->producer_dequeue_spin_time.load() << std::endl;
 
-    auto per = [](uint64_t value, uint64_t count) -> double
-    {
-        return count == 0 ? 0.0 : static_cast<double>(value) / static_cast<double>(count);
-    };
-
-    const uint64_t classifier_kmers = classifier_thread_pool->classifier_processed_kmers.load();
-    const uint64_t bloom_calls = classifier_thread_pool->bloom_calls.load();
-    const uint64_t sampled_calls = classifier_thread_pool->bloom_sampled_calls.load();
-    const uint64_t second_attempts = classifier_thread_pool->bloom_second_layer_attempts.load();
-    const uint64_t sampled_second_attempts = classifier_thread_pool->bloom_sampled_second_layer_attempts.load();
-    const uint64_t true_count = classifier_thread_pool->bloom_true_count.load();
-    const uint64_t first_fetch_or_count = classifier_thread_pool->bloom_first_fetch_or_count.load();
-    const uint64_t second_fetch_or_count = classifier_thread_pool->bloom_second_fetch_or_count.load();
-    const uint64_t sampled_first_fetch_or_count = classifier_thread_pool->bloom_sampled_first_fetch_or_count.load();
-    const uint64_t sampled_second_fetch_or_count = classifier_thread_pool->bloom_sampled_second_fetch_or_count.load();
-
-    std::cout << "Classifier processed k-mers: " << classifier_kmers << std::endl;
-    std::cout << "Prefix count cycles/kmer: "
-              << per(classifier_thread_pool->prefix_count_cycles.load(), classifier_kmers) << std::endl;
-    std::cout << "Prefix reorder cycles/kmer: "
-              << per(classifier_thread_pool->prefix_reorder_cycles.load(), classifier_kmers) << std::endl;
-    std::cout << "Classify local block cycles/kmer: "
-              << per(classifier_thread_pool->classify_local_block_cycles.load(), classifier_kmers) << std::endl;
-    std::cout << "Tree add cycles/kmer: "
-              << per(classifier_thread_pool->tree_add_cycles.load(), classifier_kmers) << std::endl;
-
-    std::cout << "Bloom calls: " << bloom_calls << std::endl;
-    std::cout << "Bloom sampled calls: " << sampled_calls << std::endl;
-    std::cout << "Bloom true ratio: " << per(true_count, bloom_calls) << std::endl;
-    std::cout << "Bloom second-layer attempt ratio: "
-              << per(second_attempts, bloom_calls) << std::endl;
-    std::cout << "Bloom first fetch_or ratio: "
-              << per(first_fetch_or_count, bloom_calls) << std::endl;
-    std::cout << "Bloom second fetch_or ratio: "
-              << per(second_fetch_or_count, second_attempts) << std::endl;
-
-    std::cout << "Bloom total cycles/sample: "
-              << per(classifier_thread_pool->bloom_total_cycles.load(), sampled_calls) << std::endl;
-    std::cout << "Bloom hash cycles/sample: "
-              << per(classifier_thread_pool->bloom_hash_cycles.load(), sampled_calls) << std::endl;
-    std::cout << "Bloom index+mask cycles/sample: "
-              << per(classifier_thread_pool->bloom_index_mask_cycles.load(), sampled_calls) << std::endl;
-    std::cout << "Bloom first load cycles/sample: "
-              << per(classifier_thread_pool->bloom_first_load_cycles.load(), sampled_calls) << std::endl;
-    std::cout << "Bloom first filter cycles/sample: "
-              << per(classifier_thread_pool->bloom_first_filter_cycles.load(), sampled_calls) << std::endl;
-    std::cout << "Bloom first fetch_or cycles/first-fetch-sample: "
-              << per(classifier_thread_pool->bloom_first_fetch_or_cycles.load(), sampled_first_fetch_or_count) << std::endl;
-    std::cout << "Bloom second load cycles/second-attempt-sample: "
-              << per(classifier_thread_pool->bloom_second_load_cycles.load(), sampled_second_attempts) << std::endl;
-    std::cout << "Bloom second filter cycles/second-attempt-sample: "
-              << per(classifier_thread_pool->bloom_second_filter_cycles.load(), sampled_second_attempts) << std::endl;
-    std::cout << "Bloom second fetch_or cycles/second-fetch-sample: "
-              << per(classifier_thread_pool->bloom_second_fetch_or_cycles.load(), sampled_second_fetch_or_count) << std::endl;
-
-    /*for (uint64_t i = 0; i < (1ULL << (2 * ROOT_BASES)); ++i)
-    {
-        std::cout << "Root prefix " << std::format("{:0{}d}", i, 3) << " count: " << root_counts[i].load(std::memory_order_relaxed) << std::endl;
-    }*/
 #endif
+
+    std::cout << "High frequency unique k-mer : " << sorted_kmer_count.load() << std::endl;
 
     return 0;
 }

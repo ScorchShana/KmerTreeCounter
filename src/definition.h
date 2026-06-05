@@ -41,20 +41,23 @@ static_assert(KMER_BLOCK_SIZE % 4096 == 0, "KMER_BLOCK_SIZE must be multiple of 
 
 // Reader与Parser之间的RingMemoryPool配置常量
 constexpr uint64_t READER_PARSER_RING_MEMORY_POOL_CAPACITY = 1ULL << 12;     // 环形内存池容量（块数），必须为2的幂
-constexpr uint64_t READER_PARSER_RING_MEMORY_POOL_BLOCK_SIZE = 64ULL * 1024; // 环形内存池块大小（字节）
+constexpr uint64_t READER_PARSER_RING_MEMORY_POOL_BLOCK_SIZE = 32ULL * 1024; // 环形内存池块大小（字节）
 
 // Parser与Classifier之间的RingMemoryPool配置常量
 constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY = 1ULL << 12;     // 环形内存池容量（块数），必须为2的幂
-constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE = 64ULL * 1024; // 环形内存池块大小（字节）
+constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE = 32ULL * 1024; // 环形内存池块大小（字节）
+
+// Classifier 线程的任务队列配置常量
+constexpr uint32_t CLASSIFIER_TASK_QUEUES_CAPACITY = 32;
 
 // 写入文件部分的RingMemoryPool配置常量
-constexpr uint64_t EXPORT_RING_MEMORY_POOL_CAPACITY = 1ULL << 10;                                      // 导出环形内存池容量（块数），必须为2的幂
-constexpr uint64_t EXPORT_RING_MEMORY_POOL_BLOCK_SIZE = PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE; // 导出环形内存池块大小（字节）
+constexpr uint64_t EXPORT_RING_MEMORY_POOL_CAPACITY = 1ULL << 10;     // 导出环形内存池容量（块数），必须为2的幂
+constexpr uint64_t EXPORT_RING_MEMORY_POOL_BLOCK_SIZE = 32ULL * 1024; // 导出环形内存池块大小（字节）
 
 // RingMemoryPool 生产者队列的内容
 struct content_type
 {
-    char *data;
+    char* data;
     uint64_t length;
 };
 
@@ -67,7 +70,7 @@ constexpr uint64_t KMER_BIN_SIZE = 2048;
 // constexpr uint32_t MAP_SIZE_FLUSH_INTERVAL = 1024; // 每线程累计新增 key 达到该阈值后批量 flush 到 map_size，降低原子争用
 
 // MPMP环状队列配置常量
-constexpr uint32_t TASK_QUEUE_CAPACITY = 64U * 1024;
+constexpr uint32_t TASK_QUEUE_CAPACITY = 16U * 1024;
 
 // task线程enqueue尝试次数
 constexpr uint32_t TASK_ENQUEUE_RETRY_LIMIT = 1ULL << 7;
@@ -125,14 +128,14 @@ struct alignas(64) Task
     // constexpr static uint32_t MAX_KMER_BLOCK_NUM = (NODE_SIZE - CACHE_LINE_SIZE - sizeof(uint64_t)
     // - sizeof(lock_type) - sizeof(kmer_block<N> *)) / sizeof(kmer_block<N> *);
 
-    node<N> *current_node = nullptr; // 需要下方的节点
+    node<N>* current_node = nullptr; // 需要下方的节点
     uint64_t depth;                  // 需要下方的节点的深度，与LayerQueues的层级对应
     uint64_t count;
-    std::array<kmer_block<N> *, MAX_KMER_BLOCK_NUM> kmer_blocks{};
+    std::array<kmer_block<N>*, MAX_KMER_BLOCK_NUM> kmer_blocks{};
 
     Task() = default;
-    Task &operator=(const Task<N> &a) = default;
-    Task(const Task<N> &a) = default;
+    Task& operator=(const Task<N>& a) = default;
+    Task(const Task<N>& a) = default;
 };
 
 template <uint32_t N>
@@ -147,24 +150,22 @@ struct KmerBatch
 template <uint32_t N>
 struct alignas(PAGE_SIZE) ExportBlock
 {
-    std::array<kmer<N>, PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)> k_mers;
+    std::array<kmer<N>, EXPORT_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)> k_mers;
 };
 
 // 写入k-mer计数
-alignas(CACHE_LINE_SIZE) inline std::atomic<uint64_t> sorted_kmer_count{0};
+alignas(CACHE_LINE_SIZE) inline std::atomic<uint64_t> sorted_kmer_count{ 0 };
 
 // 临时文件目录
 inline std::string temp_dir = "./tmp/";
 
-inline uint64_t standard_bloom_filter_capacity = 1ULL << 18; // Bloom Filter容量，单位为元素数量
+inline uint64_t standard_bloom_filter_capacity = 1ULL << 15; // 最低Bloom Filter容量，单位为元素数量
 
-// 标记哪些前缀是热的
-inline std::array<uint8_t, 1U << (2 * ROOT_BASES)> prefix_hot;
+// 布隆过滤器的容量
+inline std::array<uint64_t, 1U << (2 * ROOT_BASES)> bloom_filter_capacity;
 
-// 标记哪些冷门前缀合并到对应的布隆过滤器的Index
-inline std::array<uint8_t, 1U << (2 * ROOT_BASES)> prefix_to_bloom_index;
-
-inline std::array<uint64_t, 1U << (2 * ROOT_BASES)> bloom_filter_capacity; // 每个布隆过滤器的容量（元素数量）
+// prefix 归属的 classifier 线程索引
+inline std::array<uint8_t, 1U << (2 * ROOT_BASES)> prefix_owners;
 
 /*#ifdef TEST_MODE
 inline std::array<std::atomic<uint64_t>, 1ULL << (2 * ROOT_BASES)> root_counts{};

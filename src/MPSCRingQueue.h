@@ -30,8 +30,8 @@ class MPSCRingQueue
 	constexpr static int SPIN_LIMIT = 256;
 	constexpr static int BACKOFF_LIMIT = 64;
 
-	std::atomic<std::size_t> enqueue_pos;
-	std::atomic<std::size_t> dequeue_pos;
+	alignas(CACHE_LINE_SIZE) std::atomic<std::size_t> enqueue_pos;
+	alignas(CACHE_LINE_SIZE) std::atomic<std::size_t> dequeue_pos;
 	std::array<Cell, Capacity> buffer;
 
 public:
