@@ -107,8 +107,6 @@ public:
     {
         root_nodes = new node<N>[1ULL << (2 * ROOT_BASES)]();
 
-        memory_pool->init_arenas(); // 确保 Arena 已初始化，才能安全分配内存
-
         constexpr uint64_t node_num = 1ULL << (2 * NODE_BASES);
         for (uint64_t i = 0; i < (1ULL << (2 * ROOT_BASES)); ++i)
         {
@@ -888,7 +886,7 @@ private:
     {
         Task<N> task{};
 
-        __builtin_prefetch(thread_local_block_for_copy.data() + in_block_for_copy_offset, 0, 0);
+        ///__builtin_prefetch(thread_local_block_for_copy.data() + in_block_for_copy_offset, 0, 0);
 
         uint64_t block_for_copy_offset = in_block_for_copy_offset;
         uint64_t remaining = thread_local_block_prefix_counts[prefix];
@@ -925,6 +923,8 @@ private:
                     active_block->count = 0;
                     child_node->active_block = active_block;
                     child_node->kmer_blocks[child_node->count++] = child_node->active_block;
+
+                    need_spare = true;
                 }
                 else if (active_block->count >= capacity) [[unlikely]]
                 {
@@ -942,6 +942,8 @@ private:
                         active_block->count = 0;
                         child_node->active_block = active_block;
                         child_node->kmer_blocks[child_node->count++] = child_node->active_block;
+
+                        need_spare = true;
 
                         int backoff = 1;
                         int spin_time = 0;
@@ -970,6 +972,8 @@ private:
                         active_block->count = 0;
                         child_node->active_block = active_block;
                         child_node->kmer_blocks[child_node->count++] = active_block;
+
+                        need_spare = true;
                     }
                 }
 

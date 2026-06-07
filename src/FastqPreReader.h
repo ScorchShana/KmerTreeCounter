@@ -24,7 +24,7 @@ template <uint32_t N>
 class FastqPreReader
 {
 
-    using content_type = std::pair<char *, uint64_t>;
+    using content_type = std::pair<char*, uint64_t>;
 
     enum class State
     {
@@ -43,17 +43,18 @@ class FastqPreReader
     ssize_t need_read_ = 0;
     uint64_t chunk_size_;
     std::string filename_;
-    SPMCRingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY> *ring_memory_pool_ptr_;
-    char *file_buffer;            //
+    SPMCRingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY>* ring_memory_pool_ptr_;
+    char* file_buffer;            //
     char left_buffer_[128];       // 块在碱基行中间截断时，保存最后(k-1)个碱基用于下块前缀
     size_t left_buffer_size_ = 0; // left_buffer_中有效碱基字节数
+    bool is_gz_file = false; // 是否为 gzip 压缩文件
 
 public:
     int k;
 
-    explicit FastqPreReader(const std::string &filename, const int in_k, uint64_t chunk_size, SPMCRingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY> *in_ring_memory_pool_ptr)
+    explicit FastqPreReader(const std::string& filename, const int in_k, uint64_t chunk_size, SPMCRingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY>* in_ring_memory_pool_ptr)
         : filename_(filename), ring_memory_pool_ptr_(in_ring_memory_pool_ptr),
-          k(in_k), chunk_size_(chunk_size)
+        k(in_k), chunk_size_(chunk_size)
     {
         assert(ring_memory_pool_ptr_ != nullptr && "SPMCRingMemoryPool pointer must not be null");
         assert(k > 0 && "k must be positive");
@@ -100,7 +101,7 @@ public:
     void pre_read()
     {
         assert(ring_memory_pool_ptr_ != nullptr && "RingMemoryPool pointer must not be null");
-        char *block_ptr = nullptr;
+        char* block_ptr = nullptr;
         const uint64_t block_size = ring_memory_pool_ptr_->blockSize();
         assert(k > 0 && "k must be positive");
         assert(k < 128 && "k must be < 128");
@@ -154,13 +155,13 @@ public:
                 continue;
             }
 
-            const char *input_begin = file_buffer;
+            const char* input_begin = file_buffer;
 
             if (state_ != State::ReadSequence)
             {
-                const char *cur = input_begin + input_pos;
+                const char* cur = input_begin + input_pos;
                 const uint64_t remain = input_size - input_pos;
-                const void *newline_ptr = std::memchr(cur, '\n', remain);
+                const void* newline_ptr = std::memchr(cur, '\n', remain);
 
                 if (newline_ptr == nullptr)
                 {
@@ -168,19 +169,19 @@ public:
                     continue;
                 }
 
-                const char *newline = static_cast<const char *>(newline_ptr);
+                const char* newline = static_cast<const char*>(newline_ptr);
                 input_pos = static_cast<uint64_t>(newline - input_begin) + 1;
                 state_ = advance_state_on_newline(state_);
                 continue;
             }
 
             // HOT PATH - sequence line is copied in batches instead of char-by-char.
-            const char *seq_cur = input_begin + input_pos;
+            const char* seq_cur = input_begin + input_pos;
             const uint64_t seq_remain = input_size - input_pos;
-            const void *newline_ptr = std::memchr(seq_cur, '\n', seq_remain);
+            const void* newline_ptr = std::memchr(seq_cur, '\n', seq_remain);
             const uint64_t sequence_len = (newline_ptr == nullptr)
-                                              ? seq_remain
-                                              : static_cast<uint64_t>(static_cast<const char *>(newline_ptr) - seq_cur);
+                ? seq_remain
+                : static_cast<uint64_t>(static_cast<const char*>(newline_ptr) - seq_cur);
 
             uint64_t copied = 0;
             while (copied < sequence_len)
@@ -226,9 +227,16 @@ public:
         ring_memory_pool_ptr_->producer_set_finished();
     }
 
-    uint64_t get_file_size() const noexcept
+    uint64_t get_estimated_raw_fastq_file_size() const noexcept
     {
-        return file_size_;
+        if (is_gz_file)
+        {
+            return static_cast<uint64_t>(file_size_) * 4;
+        }
+        else
+        {
+            return static_cast<uint64_t>(file_size_);
+        }
     }
 
 private:
@@ -249,10 +257,10 @@ private:
         }
     }
 
-    void acquire_block(char *&block_ptr,
-                       uint64_t &write_size,
-                       uint64_t &last_newline_pos,
-                       bool &has_block)
+    void acquire_block(char*& block_ptr,
+        uint64_t& write_size,
+        uint64_t& last_newline_pos,
+        bool& has_block)
     {
 
         // int spin_count = 1;
@@ -277,10 +285,10 @@ private:
         }
     }
 
-    inline void store_overlap_from_block_end(const char *block_ptr,
-                                             const uint64_t write_size,
-                                             const uint64_t last_newline_pos,
-                                             const uint64_t overlap)
+    inline void store_overlap_from_block_end(const char* block_ptr,
+        const uint64_t write_size,
+        const uint64_t last_newline_pos,
+        const uint64_t overlap)
     {
         left_buffer_size_ = 0;
         if (overlap == 0 || write_size == 0)
@@ -306,10 +314,10 @@ private:
         left_buffer_size_ = static_cast<size_t>(keep_window);
     }
 
-    inline void publish_current_block(char *&block_ptr,
-                                      uint64_t &write_size,
-                                      uint64_t &last_newline_pos,
-                                      bool &has_block)
+    inline void publish_current_block(char*& block_ptr,
+        uint64_t& write_size,
+        uint64_t& last_newline_pos,
+        bool& has_block)
     {
         if (!has_block)
         {
@@ -317,7 +325,7 @@ private:
         }
         if (write_size > 0)
         {
-            ring_memory_pool_ptr_->producer_enqueue({block_ptr, write_size});
+            ring_memory_pool_ptr_->producer_enqueue({ block_ptr, write_size });
         }
         else
         {

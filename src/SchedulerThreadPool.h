@@ -210,8 +210,8 @@ private:
         uint32_t processed = 0;
         while (processed < FORMAL_WORKER_BATCH && queue->try_dequeue(task))
         {
-            layer_queues_ptr_->decrease_size();
             tree_ptr_->thread_add_kmer(task);
+            layer_queues_ptr_->decrease_size();
             ++processed;
         }
         return processed;

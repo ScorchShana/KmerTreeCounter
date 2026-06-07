@@ -48,7 +48,8 @@ constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY = 1ULL << 12;    
 constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE = 32ULL * 1024; // 环形内存池块大小（字节）
 
 // Classifier 线程的任务队列配置常量
-constexpr uint32_t CLASSIFIER_TASK_QUEUES_CAPACITY = 32;
+constexpr uint64_t GLOBAL_CLASSIFIER_TASK_QUEUE_CAPACITY = 1ULL << 10; // 全局分类器任务队列容量
+constexpr uint64_t CLASSIFIER_TASK_QUEUES_CAPACITY = 32;
 
 // 写入文件部分的RingMemoryPool配置常量
 constexpr uint64_t EXPORT_RING_MEMORY_POOL_CAPACITY = 1ULL << 10;     // 导出环形内存池容量（块数），必须为2的幂
@@ -167,8 +168,6 @@ inline std::array<uint64_t, 1U << (2 * ROOT_BASES)> bloom_filter_capacity;
 // prefix 归属的 classifier 线程索引
 inline std::array<uint8_t, 1U << (2 * ROOT_BASES)> prefix_owners;
 
-/*#ifdef TEST_MODE
-inline std::array<std::atomic<uint64_t>, 1ULL << (2 * ROOT_BASES)> root_counts{};
-#endif*/
+inline std::array<void*, 1U << (2 * ROOT_BASES)> global_bloom_filter{};
 
 #endif // TREE_DEFINITION_HEADER

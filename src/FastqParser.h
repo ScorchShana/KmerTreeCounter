@@ -39,13 +39,14 @@ class FastqParser
     uint32_t kmer_buffer_count = 0;
 
     std::vector<std::shared_ptr<MPSCRingQueue<content_type, CLASSIFIER_TASK_QUEUES_CAPACITY>>> classifier_task_queues;
+    MPMCRingQueue<content_type, GLOBAL_CLASSIFIER_TASK_QUEUE_CAPACITY>* global_classifier_task_queue;
     SPMCRingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY>* reader_parser_ring_pool;
     RingMemoryPool<PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY>* parser_classifier_ring_pool;
 
-    std::array<uint8_t, 1ULL << (2 * ROOT_BASES)> local_prefix_owners{};
+    alignas(CACHE_LINE_SIZE) std::array<uint8_t, 1ULL << (2 * ROOT_BASES)> local_prefix_owners{};
 
-    std::vector<uint32_t> local_block_owner_counts{};
-    std::vector<uint32_t> local_block_owner_sums{};
+    alignas(CACHE_LINE_SIZE) std::vector<uint32_t> local_block_owner_counts{};
+    alignas(CACHE_LINE_SIZE) std::vector<uint32_t> local_block_owner_sums{};
     std::vector<content_type> owner_contents{};
 
     std::array<kmer<N>, PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)> local_block_for_copy{};
@@ -71,10 +72,11 @@ public:
 
     explicit FastqParser(uint32_t in_k_len,
         std::vector<std::shared_ptr<MPSCRingQueue<content_type, CLASSIFIER_TASK_QUEUES_CAPACITY>>>& in_classifier_task_queues,
+        MPMCRingQueue<content_type, GLOBAL_CLASSIFIER_TASK_QUEUE_CAPACITY>* in_global_classifier_task_queue,
         SPMCRingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY>* in_reader_parser_ring_pool,
         RingMemoryPool<PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY>* in_parser_classifier_ring_pool)
         : k_len(in_k_len), classifier_task_queues(in_classifier_task_queues),
-        reader_parser_ring_pool(in_reader_parser_ring_pool), parser_classifier_ring_pool(in_parser_classifier_ring_pool), get_kmer(in_k_len)
+        global_classifier_task_queue(in_global_classifier_task_queue), reader_parser_ring_pool(in_reader_parser_ring_pool), parser_classifier_ring_pool(in_parser_classifier_ring_pool), get_kmer(in_k_len)
     {
         local_prefix_owners = prefix_owners;
         kmer_buffer_count = 0;
@@ -493,47 +495,6 @@ private:
             read_offset += remaining_count;
         }
 
-
-        //         uint64_t read_offset = 0;
-
-        //         for (uint32_t owner = 0; owner < local_block_owner_counts.size(); owner++)
-        //         {
-        //             uint32_t remaining_count = local_block_owner_counts[owner];
-
-        //             if (owner_contents[owner].length + remaining_count > max_kmers_per_block) [[unlikely]]
-        //             {
-        //                 const uint32_t copy_count = (max_kmers_per_block - owner_contents[owner].length);
-        //                 std::memcpy(owner_contents[owner].data + owner_contents[owner].length * sizeof(kmer<N>), local_block_for_copy.data() + read_offset, copy_count * sizeof(kmer<N>));
-        //                 owner_contents[owner].length += copy_count;
-
-        // #ifdef TEST_MODE
-        //                 uint64_t queue_wait_start = __rdtsc();
-        // #endif
-        //                 enqueue_content_to_classifier(owner);
-        // #ifdef TEST_MODE
-        //                 uint64_t queue_wait_end = __rdtsc();
-        //                 queue_wait_cycles += queue_wait_end - queue_wait_start;
-        // #endif
-        //                 read_offset += copy_count;
-
-        //                 owner_contents[owner].length = 0;
-
-        // #ifdef TEST_MODE
-        //                 queue_wait_start = __rdtsc();
-        // #endif
-        //                 dequeue_data_from_classifier(owner_contents[owner].data);
-        // #ifdef TEST_MODE
-        //                 queue_wait_end = __rdtsc();
-        //                 queue_wait_cycles += queue_wait_end - queue_wait_start;
-        // #endif
-
-        //                 remaining_count -= copy_count;
-        //             }
-
-        //             std::memcpy(owner_contents[owner].data + owner_contents[owner].length * sizeof(kmer<N>), local_block_for_copy.data() + read_offset, remaining_count * sizeof(kmer<N>));
-        //             owner_contents[owner].length += remaining_count;
-        //             read_offset += remaining_count;
-        //         }
     }
 
     void flush_kmer_buffer()
@@ -548,15 +509,10 @@ private:
     void enqueue_content_to_classifier(const uint32_t owner_id)
     {
 
-        // calculate_block_prefix_counts(reinterpret_cast<kmer<N> *>(content.data), content.length);
-        // push_kmers_into_local_block_for_copy(reinterpret_cast<kmer<N> *>(content.data), content.length);
-
-        // std::memcpy(content.data, local_block_for_copy.data(), content.length * sizeof(kmer<N>));
-
         int spin_count = 0;
         int backoff_iterations = 1;
 
-        while (!classifier_task_queues[owner_id]->try_enqueue(owner_contents[owner_id]))
+        while (true)
         {
 #ifdef TEST_MODE
             producer_enqueue_spin_time++;
@@ -564,10 +520,24 @@ private:
             if (spin_count < YIELD_THRESHOLD)
             {
                 // 执行 'backoff_iterations' 次暂停指令
+                if (classifier_task_queues[owner_id]->try_enqueue(owner_contents[owner_id]))
+                {
+                    break;
+                }
                 for (int i = 0; i < backoff_iterations; ++i)
                 {
                     cpu_relax();
                 }
+
+                if (global_classifier_task_queue->try_enqueue(owner_contents[owner_id]))
+                {
+                    break;
+                }
+                for (int i = 0; i < backoff_iterations; ++i)
+                {
+                    cpu_relax();
+                }
+
                 // 指数增加退避时间，直到上限
                 backoff_iterations = std::min(backoff_iterations * 2, MAX_BACKOFF);
                 spin_count++;

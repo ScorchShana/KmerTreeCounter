@@ -32,7 +32,7 @@
 uint32_t k_len;        // k-mer 的长度 (例如: 31, 41)
 uint32_t n_thread;     // 允许使用的总线程数
 uint64_t memory_limit; // 全局最大内存限制，单位为 GB
-uint64_t file_size;    // 输入 FASTQ 文件的大小，单位为字节
+uint64_t estimated_file_size;    // 输入 FASTQ 文件的估计大小，单位为字节
 
 void lpt(std::vector<std::atomic<uint32_t>>& prefix_counts, uint32_t classifier_num)
 {
@@ -84,9 +84,9 @@ void lpt(std::vector<std::atomic<uint32_t>>& prefix_counts, uint32_t classifier_
     }
 }
 
-void calculate_bloom_filter_capacity(std::vector<std::atomic<uint32_t>>& prefix_counts, uint64_t file_size)
+void calculate_bloom_filter_capacity(std::vector<std::atomic<uint32_t>>& prefix_counts, uint64_t estimated_file_size)
 {
-    const uint64_t estimated_total_kmers = file_size / 3;
+    const uint64_t estimated_total_kmers = estimated_file_size / 3;
     uint64_t total_prefix_count = 0;
 
     uint64_t max_bloom_filter_capacity = 0;
@@ -196,10 +196,12 @@ int main(int argc, char* argv[])
     auto export_ring_pool = std::make_shared<RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY>>(EXPORT_RING_MEMORY_POOL_BLOCK_SIZE, 1);
     // 初始化全局并发内存池，用于节点分配、哈希表等
     auto pool = std::make_shared<ConcurrentMemoryPool>(memory_limit * 1024ULL * 1024ULL * 1024ULL);
+    //
+    auto global_classifier_task_queue = std::make_shared<MPMCRingQueue<content_type, GLOBAL_CLASSIFIER_TASK_QUEUE_CAPACITY>>();
 
     // PreRead阶段
     FastqPreReader<N1> pre_reader(filename, k_len, FASTQ_FILE_CHUNK_SIZE, reader_parser_ring_pool.get());
-    file_size = pre_reader.get_file_size();
+    estimated_file_size = pre_reader.get_estimated_raw_fastq_file_size();
     auto pre_parser_thread = std::thread([&]
         {
             FastqPreParser<N1> parser(k_len, reader_parser_ring_pool.get(), parser_classifier_ring_pool.get());
@@ -247,8 +249,10 @@ int main(int argc, char* argv[])
     std::cout << "Average prefix count: " << average_count << std::endl;
 
     lpt(prefix_counts, classifier_num);
-    calculate_bloom_filter_capacity(prefix_counts, file_size);
+    calculate_bloom_filter_capacity(prefix_counts, estimated_file_size);
 
+    // 确保 Arena 已初始化，才能安全分配内存
+    pool->init_arenas();
     // 初始化 k-mer 字典树(KmerTree)的核心结构，整合前述多个组件
     auto tree = std::make_shared<KmerTree<N1>>(k_len, pool.get(), layer_queues.get(), export_ring_pool.get());
     // 初始化布隆过滤器的MPSC队列
@@ -259,11 +263,10 @@ int main(int argc, char* argv[])
     }
     // 初始化并构建 Tasker 线程池，负责消费层级队列并将 k-mer 路由到深层节点 / 哈希表
     auto task_thread_pool = std::make_shared<SchedulerThreadPool<N1>>(tasker_num, classifier_num, tree.get(), layer_queues.get());
-    // 初始化并构建 Parser 线程池，负责消费 FASTQ 读取器产生的数据，提取 k-mer 进行初步布隆过滤
-    auto parser_thread_pool = std::make_shared<ParserThreadPool<N1>>(k_len, classifier_task_queues, pool.get(), reader_parser_ring_pool.get(), parser_classifier_ring_pool.get(), parser_num);
     // 初始化并且构建 Classifier 线程池，负责消费 Parser 线程产生的 k-mer 数据块，进行更精细的分类和路由
-    auto classifier_thread_pool = std::make_shared<ClassifierThreadPool<N1>>(k_len, tree.get(), parser_classifier_ring_pool.get(), classifier_task_queues, task_thread_pool.get(), classifier_num);
-
+    auto classifier_thread_pool = std::make_shared<ClassifierThreadPool<N1>>(k_len, tree.get(), parser_classifier_ring_pool.get(), classifier_task_queues, global_classifier_task_queue.get(), task_thread_pool.get(), pool.get(), classifier_num);
+    // 初始化并构建 Parser 线程池，负责消费 FASTQ 读取器产生的数据，提取 k-mer 进行初步布隆过滤
+    auto parser_thread_pool = std::make_shared<ParserThreadPool<N1>>(k_len, classifier_task_queues, global_classifier_task_queue.get(), pool.get(), reader_parser_ring_pool.get(), parser_classifier_ring_pool.get(), parser_num);
     // 初始化导出写入器，用于将低频 k-mer 单线程安全落盘
     auto export_writer = std::make_shared<ExportWriter<N1>>(export_ring_pool.get());
 
@@ -271,7 +274,7 @@ int main(int argc, char* argv[])
     reader_parser_ring_pool->reset_producers(1); // Reader 线程是单生产者
     parser_classifier_ring_pool->reset_producers(parser_num);
     // 初始化最终排干(drain)阶段所需的初始任务
-    layer_queues->initialize_final_drain_queue(tree->root_nodes);
+    layer_queues->initialize_final_drain_queue(prefix_counts, tree->root_nodes);
 
     // 初始化 FASTQ 读取器，将大文件分块读取并送入 ring_pool 用作流水线起点
     FastqReader<N1> reader(filename, k_len, FASTQ_FILE_CHUNK_SIZE, reader_parser_ring_pool.get());

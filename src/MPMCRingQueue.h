@@ -16,7 +16,7 @@ class MPMCRingQueue
 {
 
 	static_assert(Capacity > 1, "Capacity must be greater than 1");
-	static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
+	static_assert((Capacity& (Capacity - 1)) == 0, "Capacity must be a power of 2");
 	static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
 
 	struct alignas(CACHE_LINE_SIZE) Cell
@@ -35,8 +35,8 @@ class MPMCRingQueue
 	std::array<Cell, Capacity> buffer;
 
 public:
-	MPMCRingQueue(const MPMCRingQueue &) = delete;
-	MPMCRingQueue &operator=(const MPMCRingQueue &) = delete;
+	MPMCRingQueue(const MPMCRingQueue&) = delete;
+	MPMCRingQueue& operator=(const MPMCRingQueue&) = delete;
 
 	MPMCRingQueue() : enqueue_pos(0), dequeue_pos(0)
 	{
@@ -46,43 +46,44 @@ public:
 		}
 	}
 
-	bool try_enqueue(const T &item)
+	bool try_enqueue(const T& item)
 	{
-		Cell *cell;
+		Cell* cell;
 		std::size_t pos = enqueue_pos.load(std::memory_order_relaxed);
 
-		cell = &buffer[pos & mask];
-
-		std::size_t seq = cell->sequence.load(std::memory_order_acquire);
-		int64_t diff = static_cast<int64_t>(seq - pos);
-
-		if (diff == 0)
+		for (;;)
 		{
-			if (enqueue_pos.compare_exchange_weak(
-					pos,
-					pos + 1,
+			cell = &buffer[pos & mask];
+			const std::size_t seq = cell->sequence.load(std::memory_order_acquire);
+			const auto diff = static_cast<int64_t>(seq) - static_cast<int64_t>(pos);
+
+			if (diff == 0)
+			{
+				if (enqueue_pos.compare_exchange_weak(
+					pos, pos + 1,
 					std::memory_order_relaxed,
 					std::memory_order_relaxed))
-			{
-				cell->data = item;
-				// 发布数据
-				cell->sequence.store(pos + 1, std::memory_order_release);
+				{
+					cell->data = item;
+					cell->sequence.store(pos + 1, std::memory_order_release);
+					return true;
+				}
 
-				return true;
+				// CAS failed: pos has been updated by compare_exchange_weak.
+				continue;
 			}
-			// CAS 失败时，pos 会被 compare_exchange_weak 更新为当前值
-		}
-		else
-		{
-			// diff < 0 当前槽位还没被消费者释放，队列满
-			// diff > 0 其他生产者已经推进 enqueue_pos
-			return false;
+			else if (diff < 0)
+			{
+				return false; // genuinely full
+			}
+
+			// diff > 0: another producer advanced enqueue_pos; retry with fresh pos.
+			pos = enqueue_pos.load(std::memory_order_relaxed);
 		}
 
-		return false;
 	}
 
-	void enqueue(const T &item)
+	void enqueue(const T& item)
 	{
 		int spin_count = 1;
 		int backoff = 1;
@@ -106,42 +107,42 @@ public:
 		}
 	}
 
-	bool try_dequeue(T &item)
+	bool try_dequeue(T& item)
 	{
-		Cell *cell;
+		Cell* cell;
 		std::size_t pos = dequeue_pos.load(std::memory_order_relaxed);
 
-		cell = &buffer[pos & mask];
-
-		std::size_t seq = cell->sequence.load(std::memory_order_acquire);
-		int64_t diff = static_cast<int64_t>(seq - (pos + 1));
-
-		if (diff == 0)
+		for (;;)
 		{
-			if (dequeue_pos.compare_exchange_weak(
-					pos,
-					pos + 1,
+			cell = &buffer[pos & mask];
+			const std::size_t seq = cell->sequence.load(std::memory_order_acquire);
+			const auto diff = static_cast<int64_t>(seq) - static_cast<int64_t>(pos + 1);
+
+			if (diff == 0)
+			{
+				if (dequeue_pos.compare_exchange_weak(
+					pos, pos + 1,
 					std::memory_order_relaxed,
 					std::memory_order_relaxed))
-			{
-				item = cell->data;
-				// 回收槽位，发布给生产者
-				cell->sequence.store(pos + Capacity, std::memory_order_release);
-				return true;
-			}
-			// CAS 失败时，pos 会被 compare_exchange_weak 更新为当前值
-		}
-		else
-		{
-			// diff < 0 当前槽位还没有生产者发布数据，队列空
-			// diff > 0 其他消费者已经推进 dequeue_pos
-			return false;
-		}
+				{
+					item = cell->data;
+					cell->sequence.store(pos + Capacity, std::memory_order_release);
+					return true;
+				}
 
-		return false;
+				continue;
+			}
+			else if (diff < 0)
+			{
+				return false; // genuinely empty
+			}
+
+			// diff > 0: another consumer advanced dequeue_pos; retry with fresh pos.
+			pos = dequeue_pos.load(std::memory_order_relaxed);
+		}
 	}
 
-	void dequeue(T &item)
+	void dequeue(T& item)
 	{
 		int spin_count = 1;
 		int backoff = 1;
