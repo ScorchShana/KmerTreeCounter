@@ -3,6 +3,8 @@ project(Tree LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON) # if compiler doesn't support C++20, then error
 
+include(CheckIncludeFileCXX)
+
 enable_testing()
 
 # List implementation source files here. Replace or remove entries
@@ -25,17 +27,37 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_link_libraries(${PROJECT_NAME} rt)
 target_link_libraries(${PROJECT_NAME} pthread)
-target_link_libraries(${PROJECT_NAME} numa)
+
+# 检查头文件
+check_include_file_cxx(numa.h HAVE_NUMA_H)
+
+if(HAVE_NUMA_H)
+    message(STATUS "numa.h found, enabling NUMA support")
+    target_link_libraries(${PROJECT_NAME} numa)
+else()
+    message(STATUS "libnuma not found, NUMA support disabled")
+endif()
+
 
 add_executable(concurrent_counting_hash_map_test tests/test_concurrent_counting_hash_map.cpp)
 target_link_libraries(concurrent_counting_hash_map_test pthread)
-target_link_libraries(concurrent_counting_hash_map_test numa)
+if(HAVE_NUMA_H)
+    message(STATUS "numa.h found, enabling NUMA support")
+    target_link_libraries(concurrent_counting_hash_map_test numa)
+else()
+    message(STATUS "libnuma not found, NUMA support disabled")
+endif()
 add_test(NAME ConcurrentCountingHashMapTest COMMAND concurrent_counting_hash_map_test 1000 10)
 
 
 add_executable(concurrent_map_test tests/test_concurrent_map.cpp)
 target_link_libraries(concurrent_map_test pthread)
-target_link_libraries(concurrent_map_test numa)
+if(HAVE_NUMA_H)
+    message(STATUS "numa.h found, enabling NUMA support")
+    target_link_libraries(concurrent_map_test numa)
+else()
+    message(STATUS "libnuma not found, NUMA support disabled")
+endif()
 add_test(NAME ConcurrentMapTest COMMAND concurrent_map_test 1000 10)
 
 

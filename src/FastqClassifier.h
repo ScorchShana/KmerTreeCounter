@@ -26,7 +26,7 @@ class FastqClassifier
     static constexpr int MAX_BACKOFF = 64;
 
     static constexpr uint64_t EXPORT_KMER_BLOCK_CAPACITY = EXPORT_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>);
-    static constexpr uint32_t BLOOM_PREFETCH_DISTANCE = 64;
+    static constexpr uint32_t BLOOM_PREFETCH_DISTANCE = 32;
 
     int k_len;
     uint32_t classifier_index;

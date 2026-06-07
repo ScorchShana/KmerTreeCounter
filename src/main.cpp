@@ -19,7 +19,6 @@
 #include <string>
 #include <memory>
 #include <limits>
-#include <format>
 #include <vector>
 #include <thread>
 #include <algorithm>

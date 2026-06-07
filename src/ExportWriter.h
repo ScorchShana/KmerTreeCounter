@@ -18,7 +18,6 @@
 #include <unordered_map>
 #include <algorithm>
 
-#include <libaio.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -595,24 +594,24 @@ class ExportWriter
 
 private:
     // 连接到 FastqParser，用于获取含有低频 k-mer 的数据块
-    RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY> *ring_memory_pool = nullptr;
+    RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY>* ring_memory_pool = nullptr;
 
     int fd;
-    kmer<N> *buffer;
+    kmer<N>* buffer;
     uint64_t buffer_count;
 
     // 专门执行落盘操作的单线程
     std::thread worker_thread;
-    std::atomic<bool> is_running{false};
+    std::atomic<bool> is_running{ false };
 
 public:
     ExportWriter() = delete;
-    ExportWriter(const ExportWriter &) = delete;
-    ExportWriter &operator=(const ExportWriter &) = delete;
-    ExportWriter(ExportWriter &&) = delete;
-    ExportWriter &operator=(ExportWriter &&) = delete;
+    ExportWriter(const ExportWriter&) = delete;
+    ExportWriter& operator=(const ExportWriter&) = delete;
+    ExportWriter(ExportWriter&&) = delete;
+    ExportWriter& operator=(ExportWriter&&) = delete;
 
-    explicit ExportWriter(RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY> *pool)
+    explicit ExportWriter(RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY>* pool)
         : ring_memory_pool(pool), fd(-1), buffer(nullptr), buffer_count(0)
     {
         fd = ::open((temp_dir + "low.bin").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -669,7 +668,7 @@ private:
         int spin_time = 0;
         int backoff = 1;
 
-        char *block_ptr = nullptr;
+        char* block_ptr = nullptr;
 
         content_type content;
 
@@ -679,7 +678,7 @@ private:
             {
                 block_ptr = content.data;
 
-                ExportBlock<N> *export_kmer_block = reinterpret_cast<ExportBlock<N> *>(block_ptr);
+                ExportBlock<N>* export_kmer_block = reinterpret_cast<ExportBlock<N> *>(block_ptr);
                 if (content.length > 0)
                 {
                     process_block(export_kmer_block, content.length);
@@ -691,7 +690,7 @@ private:
                 while (ring_memory_pool->consumer_try_dequeue(content))
                 {
                     block_ptr = content.data;
-                    ExportBlock<N> *export_kmer_block = reinterpret_cast<ExportBlock<N> *>(block_ptr);
+                    ExportBlock<N>* export_kmer_block = reinterpret_cast<ExportBlock<N> *>(block_ptr);
                     if (content.length > 0)
                     {
                         process_block(export_kmer_block, content.length);
@@ -726,7 +725,7 @@ private:
         buffer = nullptr;
     }
 
-    void process_block(ExportBlock<N> *export_block_ptr, uint64_t kmer_amount)
+    void process_block(ExportBlock<N>* export_block_ptr, uint64_t kmer_amount)
     {
         if (buffer_count + kmer_amount >= BUFFER_KMER_CAPACITY) [[unlikely]]
         {
@@ -744,7 +743,7 @@ private:
         }
     }
 
-    constexpr uint64_t get_root_prefix(const kmer<N> &val) const
+    constexpr uint64_t get_root_prefix(const kmer<N>& val) const
     {
         constexpr uint32_t shift = 2 * (BASES_PER_U64T - ROOT_BASES);
         return val.data[0] >> shift;
