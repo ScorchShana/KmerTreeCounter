@@ -52,7 +52,7 @@ constexpr uint64_t GLOBAL_CLASSIFIER_TASK_QUEUE_CAPACITY = 1ULL << 10; // 全局
 constexpr uint64_t CLASSIFIER_TASK_QUEUES_CAPACITY = 32;
 
 // 写入文件部分的RingMemoryPool配置常量
-constexpr uint64_t EXPORT_RING_MEMORY_POOL_CAPACITY = 1ULL << 10;     // 导出环形内存池容量（块数），必须为2的幂
+constexpr uint64_t EXPORT_RING_MEMORY_POOL_CAPACITY = 1ULL << 12;     // 导出环形内存池容量（块数），必须为2的幂
 constexpr uint64_t EXPORT_RING_MEMORY_POOL_BLOCK_SIZE = 32ULL * 1024; // 导出环形内存池块大小（字节）
 
 // RingMemoryPool 生产者队列的内容

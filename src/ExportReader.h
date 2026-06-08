@@ -16,14 +16,14 @@
 template <uint32_t N>
 class ExportReader
 {
-    std::FILE *file;
+    std::FILE* file;
     uint64_t kmer_amount;
 
 public:
-    ExportReader(const ExportReader &) = delete;
-    ExportReader &operator=(const ExportReader &) = delete;
-    ExportReader(ExportReader &&) = delete;
-    ExportReader &operator=(ExportReader &&) = delete;
+    ExportReader(const ExportReader&) = delete;
+    ExportReader& operator=(const ExportReader&) = delete;
+    ExportReader(ExportReader&&) = delete;
+    ExportReader& operator=(ExportReader&&) = delete;
 
     explicit ExportReader() : file(nullptr), kmer_amount(0)
     {
@@ -53,7 +53,7 @@ public:
         size_t readn = std::fread(header, 1, PAGE_SIZE, file);
         if (readn == PAGE_SIZE)
         {
-            kmer_amount = *reinterpret_cast<uint64_t *>(header);
+            kmer_amount = *reinterpret_cast<uint64_t*>(header);
         }
         else
         {
@@ -75,7 +75,7 @@ public:
         return kmer_amount;
     }
 
-    uint64_t read_kmers(kmer<N> *buffer, uint64_t max_kmers_to_read)
+    uint64_t read_kmers(kmer<N>* buffer, uint64_t max_kmers_to_read)
     {
         uint64_t read_count = std::fread(buffer, sizeof(kmer<N>), max_kmers_to_read, file);
         return read_count;

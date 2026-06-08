@@ -21,10 +21,10 @@ private:
     uint64_t local_sorted_kmer_count = 0;
 
 public:
-    FinalDrainWriter(const FinalDrainWriter &) = delete;
-    FinalDrainWriter &operator=(const FinalDrainWriter &) = delete;
-    FinalDrainWriter(FinalDrainWriter &&) = delete;
-    FinalDrainWriter &operator=(FinalDrainWriter &&) = delete;
+    FinalDrainWriter(const FinalDrainWriter&) = delete;
+    FinalDrainWriter& operator=(const FinalDrainWriter&) = delete;
+    FinalDrainWriter(FinalDrainWriter&&) = delete;
+    FinalDrainWriter& operator=(FinalDrainWriter&&) = delete;
 
     explicit FinalDrainWriter() : out_file(-1), buffer(DRAIN_EXPORT_BUFFER_SIZE), buffer_offset(0), local_sorted_kmer_count(0) {}
 
@@ -47,7 +47,7 @@ public:
             ::close(out_file);
             out_file = -1;
         }
-        if(local_sorted_kmer_count > 0)
+        if (local_sorted_kmer_count > 0)
         {
             sorted_kmer_count.fetch_add(local_sorted_kmer_count, std::memory_order_relaxed);
             local_sorted_kmer_count = 0;
@@ -71,18 +71,47 @@ public:
     }
 
     template <typename T>
-    std::size_t write(const T &kmer_info)
+    std::size_t write(const T& kmer_info)
     {
         //sorted_kmer_count.fetch_add(1, std::memory_order_relaxed);
         local_sorted_kmer_count++;
         if (sizeof(T) + buffer_offset > DRAIN_EXPORT_BUFFER_SIZE) [[unlikely]]
         {
-            ::write(out_file, buffer.data(), buffer_offset);
+            if (!write_all(buffer.data(), buffer_offset)) [[unlikely]]
+            {
+                std::cerr << "Failed to write k-mer data" << std::endl;
+                std::exit(-1);
+            }
             buffer_offset = 0;
         }
         std::memcpy(buffer.data() + buffer_offset, &kmer_info, sizeof(T));
         buffer_offset += sizeof(T);
         return sizeof(T);
+    }
+
+private:
+    bool write_all(void* data, size_t count) {
+        const uint8_t* p = static_cast<const uint8_t*>(data);
+        size_t left = count;
+
+        while (left > 0) {
+            ssize_t n = ::write(out_file, p, left);
+
+            if (n > 0) [[unlikely]]
+            {
+                p += n;
+                left -= static_cast<size_t>(n);
+                continue;
+            }
+            else if (n < 0 && errno == EINTR) [[unlikely]]
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
     }
 };
 
