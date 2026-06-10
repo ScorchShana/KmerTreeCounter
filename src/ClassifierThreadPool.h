@@ -19,6 +19,7 @@
 #include <chrono>
 #include <bitset>
 #include <barrier>
+#include <iostream>
 
 template <uint32_t N>
 class ClassifierThreadPool
@@ -34,6 +35,8 @@ class ClassifierThreadPool
     KmerTree<N>* tree;
     std::vector<std::unique_ptr<std::thread>> threads_ptr;
     std::shared_ptr<std::barrier<>> start_barrier;
+    std::shared_ptr<std::barrier<>> finish_barrier;
+    std::array<uint64_t, 1ULL << (2 * ROOT_BASES)> deal_kmer_counts{};
 
 public:
 #ifdef TEST_MODE
@@ -65,6 +68,8 @@ public:
     void start()
     {
         start_barrier = std::make_shared<std::barrier<>>(classifier_count);
+        finish_barrier = std::make_shared<std::barrier<>>(classifier_count);
+
         for (uint32_t i = 0; i < classifier_count; i++)
         {
             threads_ptr.push_back(std::make_unique<std::thread>([&, i]
@@ -73,6 +78,8 @@ public:
                     FastqClassifier<N> classifier(k_len, i, parser_classifier_ring_pool, classifier_task_queues[i].get(), global_classifier_task_queue, tree, memory_pool, *start_barrier);
                     classifier.classify_and_push();
                     task_thread_pool->mark_producer_done();
+                    finish_barrier->arrive_and_wait();
+                    deal_kmer_counts[i] = classifier.total_deal_kmer_count;
 #ifdef TEST_MODE
                     consumer_enqueue_spin_time.fetch_add(classifier.consumer_enqueue_spin_time, std::memory_order_relaxed);
                     consumer_dequeue_spin_time.fetch_add(classifier.consumer_dequeue_spin_time, std::memory_order_relaxed);
@@ -92,6 +99,10 @@ public:
             {
                 t->join();
             }
+        }
+        for(uint32_t i = 0; i < classifier_count; i++)
+        {
+            std::cout << "Classifier " << i << " dealt k-mer count: " << deal_kmer_counts[i] << "\n";
         }
     }
 };

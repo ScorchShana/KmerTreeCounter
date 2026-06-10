@@ -189,9 +189,9 @@ private:
         const char* end = data_ptr + length;
         alignas(32) uint8_t codes[32];
 
-        while (ptr < end)
+        while (static_cast<size_t>(end - ptr) >= 32)
         {
-            size_t chunk = std::min<size_t>(end - ptr, 32);
+            size_t chunk = 32;
             __m256i input = _mm256_loadu_si256((__m256i*)ptr);
 
             __m256i upper = _mm256_and_si256(input, MASK_UPPER);
@@ -275,15 +275,37 @@ private:
             }
             ptr += chunk;
         }
+
+        while(ptr < end)
+        {
+            const char c = *ptr;
+            ptr++;
+            if (get_kmer.get_next_one(c))
+            {
+                
+                if (content_kmer_count + 1 > (PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>))) [[unlikely]]
+                {
+                    parser_classifier_content.length = content_kmer_count;
+                    enqueue_content_to_classifier(parser_classifier_content);
+                    // enqueue_content_to_classifier(parser_classifier_content);
+                    total_read_kmer += content_kmer_count;
+                    content_kmer_count = 0;
+                    dequeue_data_from_classifier(parser_classifier_content.data);
+                    // parser_classifier_ring_pool->producer_dequeue(parser_classifier_content.data);
+                    kmer_buffer = reinterpret_cast<kmer<N> *>(parser_classifier_content.data);
+                }
+                kmer_buffer[content_kmer_count++] = get_kmer.canonical_kmer;
+            }
+        }
 #elif defined(__SSE4_2__)
         // 一次处理16字节
         const char* ptr = data_ptr;
         const char* end = data_ptr + length;
         alignas(16) uint8_t codes[16];
 
-        while (ptr < end)
+        while (static_cast<size_t>(end - ptr) >= 16)
         {
-            size_t chunk = std::min<size_t>(end - ptr, 16);
+            size_t chunk = 16;
             __m128i input = _mm_loadu_si128((__m128i*)ptr);
 
             __m128i upper = _mm_and_si128(input, MASK_UPPER);
@@ -354,6 +376,27 @@ private:
                 }
             }
             ptr += chunk;
+        }
+
+        while(ptr < end)
+        {
+            const char c = *ptr;
+            ptr++;
+            if (get_kmer.get_next_one(c))
+            {
+                if (content_kmer_count + 1 > (PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>))) [[unlikely]]
+                {
+                    parser_classifier_content.length = content_kmer_count;
+                    enqueue_content_to_classifier(parser_classifier_content);
+                    // enqueue_content_to_classifier(parser_classifier_content);
+                    total_read_kmer += content_kmer_count;
+                    content_kmer_count = 0;
+                    dequeue_data_from_classifier(parser_classifier_content.data);
+                    // parser_classifier_ring_pool->producer_dequeue(parser_classifier_content.data);
+                    kmer_buffer = reinterpret_cast<kmer<N> *>(parser_classifier_content.data);
+                }
+                kmer_buffer[content_kmer_count++] = get_kmer.canonical_kmer;
+            }
         }
 #else
         for (int i = 0; i < length; ++i)

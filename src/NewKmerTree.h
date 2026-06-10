@@ -792,9 +792,9 @@ private:
 
             if (frame.depth >= MAX_DEPTH - 1)
             {
+                ConcurrentMap<N>* hash_map = current->hash_map.load(std::memory_order_acquire);
                 if (current->count > 0)
-                {
-                    ConcurrentMap<N>* hash_map = current->hash_map.load(std::memory_order_acquire);
+                {      
                     if (hash_map != nullptr)
                     {
                         // Full node: already has frequency-counting infrastructure
@@ -812,6 +812,13 @@ private:
                     {
                         // Non-full node: export as regular leaf
                         sort_and_export_leaf(current, writer);
+                    }
+                }
+                else{
+                    if (hash_map != nullptr)
+                    {
+                        // Edge case: has hash map but no pending k-mers in blocks, still need to export hash map contents
+                        export_hash_map(writer, hash_map);
                     }
                 }
                 continue;

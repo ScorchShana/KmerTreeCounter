@@ -146,6 +146,7 @@ private:
                 else {
                     ring_memory_pool->consumer_enqueue(block_ptr);
                 }
+                // ring_memory_pool->consumer_enqueue(block_ptr);
 
             }
             else if (ring_memory_pool->producer_finished())
@@ -161,7 +162,7 @@ private:
                     else {
                         ring_memory_pool->consumer_enqueue(block_ptr);
                     }
-
+                    // ring_memory_pool->consumer_enqueue(block_ptr);
                 }
                 break;
             }
@@ -194,8 +195,8 @@ private:
             wait_write_finish(current_buffer_index);
         }
 
-        delete[] buffer[0];
-        delete[] buffer[1];
+        if(!buffer[0]) delete[] buffer[0];
+        if(!buffer[1]) delete[] buffer[1];
         buffer[0] = nullptr;
         buffer[1] = nullptr;
     }
