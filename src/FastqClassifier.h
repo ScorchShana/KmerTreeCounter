@@ -26,7 +26,7 @@ class FastqClassifier
     static constexpr int MAX_BACKOFF = 64;
 
     static constexpr uint64_t EXPORT_KMER_BLOCK_CAPACITY = EXPORT_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>);
-    static constexpr uint32_t BLOOM_PREFETCH_DISTANCE = 32;
+    static constexpr uint32_t BLOOM_PREFETCH_DISTANCE = 8; // 预取 Bloom Filter 的距离（单位：k-mer数量）
 
     int k_len;
     uint32_t classifier_index;
@@ -50,9 +50,12 @@ class FastqClassifier
 
     std::vector<ConcurrentBloomFilter<N>> local_bloom_filters;
 
+
+
     SplitMix64 rng;
 
 public:
+    uint64_t total_deal_kmer_count = 0;
 #ifdef TEST_MODE
     uint64_t producer_enqueue_spin_time{ 0 };
     uint64_t producer_dequeue_spin_time{ 0 };
@@ -212,6 +215,7 @@ private:
         calculate_block_prefix_counts(kmer_data, kmer_count);
         push_kmers_into_local_block_for_copy(kmer_data, kmer_count);
         classify_owned_local_block();
+        total_deal_kmer_count += kmer_count;
     }
 
     void process_other_block(kmer<N>* kmer_data, const uint64_t kmer_count)
@@ -219,6 +223,7 @@ private:
         calculate_block_prefix_counts(kmer_data, kmer_count);
         push_kmers_into_local_block_for_copy(kmer_data, kmer_count);
         classify_other_local_block();
+        total_deal_kmer_count += kmer_count;
     }
 
     void calculate_block_prefix_counts(kmer<N>* kmer_data, const uint64_t kmer_count)
@@ -378,66 +383,90 @@ private:
 
             ConcurrentBloomFilter<N>& bloom_filter = *local_global_bloom_filter[prefix];
 
-            if (prefix_count < BLOOM_PREFETCH_DISTANCE / 2) [[unlikely]]
+            // if (prefix_count < BLOOM_PREFETCH_DISTANCE / 2) [[unlikely]]
+            // {
+            //     for (uint32_t i = 0; i < prefix_count; ++i)
+            //     {
+            //         const kmer<N>& val = local_block_for_copy[read_offset];
+
+            //         if (bloom_filter.insert(val))
+            //         {
+            //             export_block_ptr->k_mers[export_kmer_block_count++] = val;
+            //             prefix_export_count++;
+
+            //             if (export_kmer_block_count == EXPORT_KMER_BLOCK_CAPACITY) [[unlikely]]
+            //             {
+            //                 enqueue_content_to_export_writer({ reinterpret_cast<char*>(export_block_ptr), export_kmer_block_count });
+            //                 export_kmer_block_count = 0;
+            //                 char* raw_block_ptr = nullptr;
+            //                 dequeue_data_to_export_writer(raw_block_ptr);
+            //                 export_block_ptr = reinterpret_cast<ExportBlock<N> *>(raw_block_ptr);
+            //             }
+            //         }
+            //         else
+            //         {
+            //             local_block_for_copy[local_block_count++] = val;
+            //         }
+
+            //         read_offset++;
+            //     }
+
+            //     local_block_prefix_counts[prefix] -= prefix_export_count;
+            //     continue;
+            // }
+
+            // std::array<typename ConcurrentBloomFilter<N>::InsertProbe, BLOOM_PREFETCH_DISTANCE> probes;
+            // const uint64_t prefix_begin = read_offset;
+            // const uint32_t warmup_count = (prefix_count < BLOOM_PREFETCH_DISTANCE) ? prefix_count : BLOOM_PREFETCH_DISTANCE;
+
+            // for (uint32_t i = 0; i < warmup_count; ++i)
+            // {
+            //     const uint64_t idx = prefix_begin + i;
+            //     probes[i] = bloom_filter.prepare_insert(local_block_for_copy[idx]);
+            //     bloom_filter.prefetch_insert(probes[i]);
+            // }
+
+            // for (uint32_t i = 0; i < prefix_count; ++i)
+            // {
+            //     const uint32_t slot = i % BLOOM_PREFETCH_DISTANCE;
+            //     const uint64_t idx = prefix_begin + i;
+            //     const kmer<N>& val = local_block_for_copy[idx];
+
+            //     const bool is_first = bloom_filter.insert_prepared(probes[slot]);
+
+            //     const uint32_t next_i = i + BLOOM_PREFETCH_DISTANCE;
+            //     if (next_i < prefix_count)
+            //     {
+            //         const uint64_t next_idx = prefix_begin + next_i;
+            //         probes[slot] = bloom_filter.prepare_insert(local_block_for_copy[next_idx]);
+            //         bloom_filter.prefetch_insert(probes[slot]);
+            //     }
+
+            //     if (is_first)
+            //     {
+            //         export_block_ptr->k_mers[export_kmer_block_count++] = val;
+            //         prefix_export_count++;
+
+            //         if (export_kmer_block_count == EXPORT_KMER_BLOCK_CAPACITY) [[unlikely]]
+            //         {
+            //             enqueue_content_to_export_writer({ reinterpret_cast<char*>(export_block_ptr), export_kmer_block_count });
+            //             export_kmer_block_count = 0;
+            //             char* raw_block_ptr = nullptr;
+            //             dequeue_data_to_export_writer(raw_block_ptr);
+            //             export_block_ptr = reinterpret_cast<ExportBlock<N> *>(raw_block_ptr);
+            //         }
+            //     }
+            //     else
+            //     {
+            //         local_block_for_copy[local_block_count++] = val;
+            //     }
+            // }
+
+            for (uint32_t i = 0; i < prefix_count; i++)
             {
-                for (uint32_t i = 0; i < prefix_count; ++i)
-                {
-                    const kmer<N>& val = local_block_for_copy[read_offset];
+                const kmer<N>& val = local_block_for_copy[read_offset];
 
-                    if (bloom_filter.insert(val))
-                    {
-                        export_block_ptr->k_mers[export_kmer_block_count++] = val;
-                        prefix_export_count++;
-
-                        if (export_kmer_block_count == EXPORT_KMER_BLOCK_CAPACITY) [[unlikely]]
-                        {
-                            enqueue_content_to_export_writer({ reinterpret_cast<char*>(export_block_ptr), export_kmer_block_count });
-                            export_kmer_block_count = 0;
-                            char* raw_block_ptr = nullptr;
-                            dequeue_data_to_export_writer(raw_block_ptr);
-                            export_block_ptr = reinterpret_cast<ExportBlock<N> *>(raw_block_ptr);
-                        }
-                    }
-                    else
-                    {
-                        local_block_for_copy[local_block_count++] = val;
-                    }
-
-                    read_offset++;
-                }
-
-                local_block_prefix_counts[prefix] -= prefix_export_count;
-                continue;
-            }
-
-            std::array<typename ConcurrentBloomFilter<N>::InsertProbe, BLOOM_PREFETCH_DISTANCE> probes;
-            const uint64_t prefix_begin = read_offset;
-            const uint32_t warmup_count = (prefix_count < BLOOM_PREFETCH_DISTANCE) ? prefix_count : BLOOM_PREFETCH_DISTANCE;
-
-            for (uint32_t i = 0; i < warmup_count; ++i)
-            {
-                const uint64_t idx = prefix_begin + i;
-                probes[i] = bloom_filter.prepare_insert(local_block_for_copy[idx]);
-                bloom_filter.prefetch_insert(probes[i]);
-            }
-
-            for (uint32_t i = 0; i < prefix_count; ++i)
-            {
-                const uint32_t slot = i % BLOOM_PREFETCH_DISTANCE;
-                const uint64_t idx = prefix_begin + i;
-                const kmer<N>& val = local_block_for_copy[idx];
-
-                const bool is_first = bloom_filter.insert_prepared(probes[slot]);
-
-                const uint32_t next_i = i + BLOOM_PREFETCH_DISTANCE;
-                if (next_i < prefix_count)
-                {
-                    const uint64_t next_idx = prefix_begin + next_i;
-                    probes[slot] = bloom_filter.prepare_insert(local_block_for_copy[next_idx]);
-                    bloom_filter.prefetch_insert(probes[slot]);
-                }
-
-                if (is_first)
+                if (bloom_filter.insert(val))
                 {
                     export_block_ptr->k_mers[export_kmer_block_count++] = val;
                     prefix_export_count++;
@@ -455,9 +484,11 @@ private:
                 {
                     local_block_for_copy[local_block_count++] = val;
                 }
+
+                read_offset++;
             }
 
-            read_offset += prefix_count;
+            //read_offset += prefix_count;
             local_block_prefix_counts[prefix] -= prefix_export_count;
         }
 

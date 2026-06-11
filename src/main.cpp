@@ -173,7 +173,7 @@ int main(int argc, char* argv[])
 
     // 根据预算计算分给 Worker 的解析(Parser)线程和任务(Tasker)线程的数量
     // Worker 预算去除了主线程(Reader)和导出线程(ExportWriter)
-    const uint32_t parser_num = (n_thread / 6 > 0) ? (n_thread / 6) : 1; // 预留至少 1 个线程给 Parser，剩余线程在 Parser 和 Tasker 之间分配
+    const uint32_t parser_num = (n_thread / 8 > 0) ? (n_thread / 8) : 1; // 预留至少 1 个线程给 Parser，剩余线程在 Parser 和 Tasker 之间分配
     const uint32_t worker_budget = n_thread - 2 - parser_num;
     const uint32_t classifier_num = (worker_budget / (1.0 + TASK_CLASSIFIER_RATIO) == 0) ? 1 : (uint32_t)(worker_budget / (1.0 + TASK_CLASSIFIER_RATIO));
     const uint32_t tasker_num = worker_budget - classifier_num;
@@ -267,7 +267,7 @@ int main(int argc, char* argv[])
     // 初始化并构建 Parser 线程池，负责消费 FASTQ 读取器产生的数据，提取 k-mer 进行初步布隆过滤
     auto parser_thread_pool = std::make_shared<ParserThreadPool<N1>>(k_len, classifier_task_queues, global_classifier_task_queue.get(), pool.get(), reader_parser_ring_pool.get(), parser_classifier_ring_pool.get(), parser_num);
     // 初始化导出写入器，用于将低频 k-mer 单线程安全落盘
-    auto export_writer = std::make_shared<ExportWriter<N1>>(export_ring_pool.get());
+    auto export_writer = std::make_shared<ExportWriter<N1>>(k_len, export_ring_pool.get());
 
     // 正式计数阶段
     reader_parser_ring_pool->reset_producers(1); // Reader 线程是单生产者

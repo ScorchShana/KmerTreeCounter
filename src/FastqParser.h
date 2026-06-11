@@ -24,6 +24,10 @@
 #else
 #endif
 
+#ifdef TEST_MODE
+#include <x86intrin.h>
+#endif
+
 template <uint32_t N>
 class FastqParser
 {
@@ -230,9 +234,9 @@ private:
         const char* end = data_ptr + length;
         alignas(32) uint8_t codes[32];
 
-        while (ptr < end)
+        while (static_cast<size_t>(end - ptr) >= 32)
         {
-            size_t chunk = std::min<size_t>(end - ptr, 32);
+            size_t chunk = 32;
             __m256i input = _mm256_loadu_si256((__m256i*)ptr);
 
             __m256i upper = _mm256_and_si256(input, MASK_UPPER);
@@ -316,15 +320,38 @@ private:
             }
             ptr += chunk;
         }
+
+        constexpr uint64_t KMER_BUF_CAP = PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>);
+        while(ptr < end)
+        {
+            const char c = *ptr;
+            ptr++;
+            if (get_kmer.get_next_one(c))
+            {
+                if(kmer_buffer_count + 1 > KMER_BUF_CAP) [[unlikely]]
+                {
+#ifdef TEST_MODE
+                    uint64_t flush_start = __rdtsc();
+#endif
+                    flush_kmer_buffer();
+#ifdef TEST_MODE
+                    uint64_t flush_end = __rdtsc();
+                    flush_cycles += (flush_end - flush_start);
+#endif
+                }
+                kmer_buffer[kmer_buffer_count++] = get_kmer.canonical_kmer;
+            }
+        }
+        
 #elif defined(__SSE4_2__)
         // 一次处理16字节
         const char* ptr = data_ptr;
         const char* end = data_ptr + length;
         alignas(16) uint8_t codes[16];
 
-        while (ptr < end)
+        while (static_cast<size_t>(end - ptr) >= 16)
         {
-            size_t chunk = std::min<size_t>(end - ptr, 16);
+            size_t chunk = 16;
             __m128i input = _mm_loadu_si128((__m128i*)ptr);
 
             __m128i upper = _mm_and_si128(input, MASK_UPPER);
@@ -371,7 +398,14 @@ private:
                     constexpr uint64_t KMER_BUF_CAP = PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>);
                     if (kmer_buffer_count + static_cast<uint64_t>(run_len) > KMER_BUF_CAP) [[unlikely]]
                     {
+#ifdef TEST_MODE
+                        uint64_t flush_start = __rdtsc();
+#endif
                         flush_kmer_buffer();
+#ifdef TEST_MODE
+                        uint64_t flush_end = __rdtsc();
+                        flush_cycles += (flush_end - flush_start);
+#endif
                     }
 
                     uint32_t new_kmers = get_kmer.batch_insert(packed, run_len,
@@ -389,6 +423,28 @@ private:
             }
             ptr += chunk;
         }
+
+        constexpr uint64_t KMER_BUF_CAP = PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>);
+        while (ptr < end)
+        {
+            const char c = *ptr;
+            ptr++;
+            if (get_kmer.get_next_one(c))
+            {
+                if (kmer_buffer_count + 1 > KMER_BUF_CAP) [[unlikely]]
+                {
+#ifdef TEST_MODE
+                    uint64_t flush_start = __rdtsc();
+#endif
+                    flush_kmer_buffer();
+#ifdef TEST_MODE
+                    uint64_t flush_end = __rdtsc();
+                    flush_cycles += (flush_end - flush_start);
+#endif
+    }
+                kmer_buffer[kmer_buffer_count++] = get_kmer.canonical_kmer;
+}
+        }
 #else
         for (int i = 0; i < length; ++i)
         {
@@ -398,7 +454,14 @@ private:
                 kmer_buffer[kmer_buffer_count++] = get_kmer.canonical_kmer;
                 if (kmer_buffer_count >= (PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>))) [[unlikely]]
                 {
+#ifdef TEST_MODE
+                    uint64_t flush_start = __rdtsc();
+#endif
                     flush_kmer_buffer();
+#ifdef TEST_MODE
+                    uint64_t flush_end = __rdtsc();
+                    flush_cycles += (flush_end - flush_start);
+#endif
                 }
             }
         }
