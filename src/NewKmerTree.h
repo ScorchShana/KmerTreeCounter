@@ -787,6 +787,7 @@ private:
             ConcurrentMap<N>* hash_map = current->hash_map.load(std::memory_order_acquire);
             if (frame.depth >= MAX_DEPTH - 1)
             {
+                ConcurrentMap<N>* hash_map = current->hash_map.load(std::memory_order_acquire);
                 if (current->count > 0)
                 {
                     if (hash_map != nullptr)
@@ -809,6 +810,13 @@ private:
                     }
                 }else{
                     if(hash_map != nullptr){
+                        export_hash_map(writer, hash_map);
+                    }
+                }
+                else{
+                    if (hash_map != nullptr)
+                    {
+                        // Edge case: has hash map but no pending k-mers in blocks, still need to export hash map contents
                         export_hash_map(writer, hash_map);
                     }
                 }

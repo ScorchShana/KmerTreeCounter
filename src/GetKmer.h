@@ -16,7 +16,7 @@ public:
 
     uint64_t rev_insert_shift; // 反向 k-mer 插入时需要左移的位数
 
-    explicit GetKmer(const uint32_t in_k) : k(in_k), have_read(0), remainder(k% BASES_PER_U64T)
+    explicit GetKmer(const uint32_t in_k) : k(in_k), kmer_last_index((k - 1) / 32), have_read(0), remainder(k % BASES_PER_U64T)
     {
 
         for (int i = 0; i < 256; i++)
@@ -70,11 +70,11 @@ public:
 
         seq_kmer.template shift_right_static<1>();
         seq_kmer.data[0] |= (base_2bit << (BASES_PER_U64T * 2 - 2));
-        seq_kmer.data[N - 1] &= back_mask;
+        seq_kmer.data[kmer_last_index] &= back_mask;
 
         rev_kmer.template shift_left_static<1>();
 
-        rev_kmer.data[N - 1] |= (base_2bit ^ 0b11) << rev_insert_shift;
+        rev_kmer.data[kmer_last_index] |= (base_2bit ^ 0b11) << rev_insert_shift;
 
         canonicalize();
 
@@ -97,10 +97,10 @@ public:
 
             seq_kmer.template shift_right_static<1>();
             seq_kmer.data[0] |= code << 62;
-            seq_kmer.data[N - 1] &= back_mask;
+            seq_kmer.data[kmer_last_index] &= back_mask;
 
             rev_kmer.template shift_left_static<1>();
-            rev_kmer.data[N - 1] |= (code ^ 0b11ULL) << rev_insert_shift;
+            rev_kmer.data[kmer_last_index] |= (code ^ 0b11ULL) << rev_insert_shift;
 
             if (++have_read >= k) [[likely]]
             {
@@ -144,10 +144,10 @@ public:
 
             seq_kmer.template shift_right_static<1>();
             seq_kmer.data[0] |= code << 62;
-            seq_kmer.data[N - 1] &= back_mask;
+            seq_kmer.data[kmer_last_index] &= back_mask;
 
             rev_kmer.template shift_left_static<1>();
-            rev_kmer.data[N - 1] |= (code ^ 0b11ULL) << rev_insert_shift;
+            rev_kmer.data[kmer_last_index] |= (code ^ 0b11ULL) << rev_insert_shift;
 
             if (++have_read >= k) [[likely]]
             {
@@ -171,43 +171,44 @@ public:
                     }
                 }
             }
-}
+        }
 
         return out_cnt;
     }
 #else
 #endif
 
-void canonicalize() noexcept
-{
-    uint64_t mask = -(seq_kmer < rev_kmer); // 无分支掩码
+    void canonicalize() noexcept
+    {
+        uint64_t mask = -(seq_kmer < rev_kmer); // 无分支掩码
 
-    if constexpr (N == 1)
-    {
-        canonical_kmer.data[0] = (seq_kmer.data[0] & mask) | (rev_kmer.data[0] & (~mask));
-    }
-    else if constexpr (N == 2)
-    {
-        canonical_kmer.data[0] = (seq_kmer.data[0] & mask) | (rev_kmer.data[0] & (~mask));
-        canonical_kmer.data[1] = (seq_kmer.data[1] & mask) | (rev_kmer.data[1] & (~mask));
-    }
-    else if constexpr (N == 4)
-    {
-        canonical_kmer.data[0] = (seq_kmer.data[0] & mask) | (rev_kmer.data[0] & (~mask));
-        canonical_kmer.data[1] = (seq_kmer.data[1] & mask) | (rev_kmer.data[1] & (~mask));
-        canonical_kmer.data[2] = (seq_kmer.data[2] & mask) | (rev_kmer.data[2] & (~mask));
-        canonical_kmer.data[3] = (seq_kmer.data[3] & mask) | (rev_kmer.data[3] & (~mask));
-    }
-    else {
-        for (uint32_t i = 0; i < N; ++i)
+        if constexpr (N == 1)
         {
-            canonical_kmer.data[i] = (seq_kmer.data[i] & mask) | (rev_kmer.data[i] & (~mask));
+            canonical_kmer.data[0] = (seq_kmer.data[0] & mask) | (rev_kmer.data[0] & (~mask));
+        }
+        else if constexpr (N == 2)
+        {
+            canonical_kmer.data[0] = (seq_kmer.data[0] & mask) | (rev_kmer.data[0] & (~mask));
+            canonical_kmer.data[1] = (seq_kmer.data[1] & mask) | (rev_kmer.data[1] & (~mask));
+        }
+        else if constexpr (N == 4)
+        {
+            canonical_kmer.data[0] = (seq_kmer.data[0] & mask) | (rev_kmer.data[0] & (~mask));
+            canonical_kmer.data[1] = (seq_kmer.data[1] & mask) | (rev_kmer.data[1] & (~mask));
+            canonical_kmer.data[2] = (seq_kmer.data[2] & mask) | (rev_kmer.data[2] & (~mask));
+            canonical_kmer.data[3] = (seq_kmer.data[3] & mask) | (rev_kmer.data[3] & (~mask));
+        }
+        else {
+            for (uint32_t i = 0; i < N; ++i)
+            {
+                canonical_kmer.data[i] = (seq_kmer.data[i] & mask) | (rev_kmer.data[i] & (~mask));
+            }
         }
     }
-}
 
 private:
     const uint32_t k;
+    const uint32_t kmer_last_index;
     uint64_t back_mask;
     uint64_t have_read = 0;
     const uint64_t remainder; // 最后一个 uint64_t 中剩余的碱基数（如果 k 不是 BASES_PER_U64T 的倍数）
