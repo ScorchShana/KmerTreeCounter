@@ -39,7 +39,7 @@ class PostProcess
 
     std::vector<kmer<N>> highFreqKmer;
     std::vector<std::vector<ExportRecord>> buckets{NUM_BUCKETS};
-    std::unordered_map<uint32_t, uint64_t> hist;   // count → num_kmers
+    std::unordered_map<uint32_t, uint64_t> hist;   // 记录频次
 
     std::string output_low_filename;
     std::string output_root_filename;
@@ -166,7 +166,6 @@ private:
             buckets[i].insert(buckets[i].end(), buf.begin(), buf.begin() + record_count);
             for (auto &rec : buf) {
                 highFreqKmer.push_back(rec.key);
-                // Bloom Filter 首次误判为低频 → 计数少了 1, 补偿回去
                 hist[static_cast<uint32_t>(rec.count + 1)]++;
             }
         }

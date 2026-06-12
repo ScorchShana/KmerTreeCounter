@@ -1176,7 +1176,7 @@ private:
             std::sort(block->k_mers.begin(), block->k_mers.begin() + static_cast<std::ptrdiff_t>(block->count));
         }
 
-        // 用 LoserTree 做 K 路归并，O(log K) 选最小值
+        // 用 LoserTree 做 K 路归并
         static constexpr int LT_WAYS = 16;
         kmer<N> sentinel;
         sentinel.data.fill(UINT64_MAX);

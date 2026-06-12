@@ -5,14 +5,10 @@
 #include <functional>
 
 /**
- * 败者树（通用模板）
- *
+ * 败者树
  * @tparam T         叶子元素类型
  * @tparam Ways      最大路数
- * @tparam Compare   比较器 (默认 std::less<T>，选出最小元素)
- *
- * 路数栈上分配，无堆内存开销。
- * 建树方式：自底向上，内部节点只与直接子树比较。
+ * @tparam Compare   比较器
  */
 template <typename T, int Ways, typename Compare = std::less<T>>
 class LoserTree {
@@ -44,10 +40,10 @@ public:
     /**
      * 初始化败者树。
      *
-     * @param chunk_ptrs  各路 T 数组指针 (chunk_ptrs[i] 指向第 i 路 T[0])
+     * @param chunk_ptrs   T 数组指针
      * @param lengths     各路长度
-     * @param num_blocks  实际活跃路数 (≤ Ways)
-     * @return 全局胜者 (叶子索引)
+     * @param num_blocks  实际活跃路数
+     * @return 叶子索引
      */
     int init(T** chunk_ptrs, int* lengths, int num_blocks) {
         num_active_ways = num_blocks;
