@@ -19,8 +19,8 @@
 #include <unordered_map>
 #include <fstream>
 
-inline const std::string temp_dir = "./project/KmerTreeCounter/build/tmp/";
-inline const std::string output_dir = "./";
+inline  std::string temp_dir = "./project/KmerTreeCounter/build/tmp/";
+inline std::string output_dir = "./";
 inline const uint64_t PAGE_SIZE = 4096;
 
 template <uint32_t N>

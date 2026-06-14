@@ -14,7 +14,6 @@
 #include "ConcurrentCountingHashMap.h"
 #include "RingMemoryPool.h"
 #include "CountingHashMap.h"
-#include "LoserTree.h"
 
 #include <atomic>
 #include <vector>
@@ -58,16 +57,18 @@ class KmerTree
     static constexpr int WRITER_WAITING_MAX_BACKOFF = 64;
     static constexpr int WRITER_WAITING_SPIN_TIME = 256;
 
-    struct ExportRecord
-    {
-        kmer<N> key;
-        uint32_t count;
-    };
+    
 
     struct DrainFrame
     {
         node<N>* node_ptr;
         uint32_t depth;
+    };
+
+    struct MergeCursor
+    {
+        kmer_block<N>* block;
+        uint64_t index;
     };
 
     uintptr_t MAGIC_POINTER = 0x1; // 用于标记特殊指针（如正在构建的 Bloom Filter）
@@ -87,7 +88,7 @@ class KmerTree
     static inline thread_local std::array<kmer<N>, KMER_BLOCK_SIZE / sizeof(kmer<N>)> thread_local_block_for_copy{};
     // 本地任务缓存栈，避免频繁向全局队列 push/pop
     static inline thread_local std::vector<Task<N>> thread_local_task_stack;
-    static inline thread_local std::vector<ExportRecord> thread_local_export_buffer;
+    static inline thread_local std::vector<ExportRecord<N>> thread_local_export_buffer;
     static inline thread_local CountingHashMap<N> thread_local_counting_has_map;
     // 提前分配的spare block
     static inline thread_local char* thread_local_spare_block = nullptr;
@@ -784,7 +785,7 @@ private:
             node_stack.pop_back();
 
             node<N>* current = frame.node_ptr;
-            ConcurrentMap<N>* hash_map = current->hash_map.load(std::memory_order_acquire);
+
             if (frame.depth >= MAX_DEPTH - 1)
             {
                 ConcurrentMap<N>* hash_map = current->hash_map.load(std::memory_order_acquire);
@@ -808,12 +809,8 @@ private:
                         // Non-full node: export as regular leaf
                         sort_and_export_leaf(current, writer);
                     }
-                }else{
-                    if(hash_map != nullptr){
-                        export_hash_map(writer, hash_map);
-                    }
                 }
-                else{
+                else {
                     if (hash_map != nullptr)
                     {
                         // Edge case: has hash map but no pending k-mers in blocks, still need to export hash map contents
@@ -1165,7 +1162,7 @@ private:
             return;
         }
 
-        ExportRecord record{ key, count };
+        ExportRecord<N> record{ key, count };
         writer.write(record);
     }
 
@@ -1184,29 +1181,34 @@ private:
             std::sort(block->k_mers.begin(), block->k_mers.begin() + static_cast<std::ptrdiff_t>(block->count));
         }
 
-        // 用 LoserTree 做 K 路归并
-        static constexpr int LT_WAYS = 16;
-        kmer<N> sentinel;
-        sentinel.data.fill(UINT64_MAX);
-
-        kmer<N>* chunk_ptrs[LT_WAYS];
-        int lengths[LT_WAYS];
-        for (uint64_t i = 0; i < block_count; ++i) {
-            chunk_ptrs[i] = leaf->kmer_blocks[i]->k_mers.data();
-            lengths[i] = static_cast<int>(leaf->kmer_blocks[i]->count);
+        std::array<MergeCursor, MAX_KMER_BLOCK_NUM> cursors{};
+        uint64_t active_cursor_count = 0;
+        for (uint64_t i = 0; i < block_count; ++i)
+        {
+            if (leaf->kmer_blocks[i]->count > 0)
+            {
+                cursors[active_cursor_count++] = MergeCursor{ leaf->kmer_blocks[i], 0 };
+            }
         }
-
-        LoserTree<kmer<N>, LT_WAYS> lt(sentinel);
-        int winner = lt.init(chunk_ptrs, lengths, static_cast<int>(block_count));
 
         bool has_prev = false;
         kmer<N> prev_key;
         uint32_t prev_count = 0;
 
-        int emitted = 0;
-        while (emitted < lt.total_elems)
+        while (active_cursor_count > 0)
         {
-            const kmer<N>& current_key = lt.leaf_elements[winner];
+            uint64_t min_pos = 0;
+            for (uint64_t i = 1; i < active_cursor_count; ++i)
+            {
+                const kmer<N>& lhs = cursors[i].block->k_mers[cursors[i].index];
+                const kmer<N>& rhs = cursors[min_pos].block->k_mers[cursors[min_pos].index];
+                if (lhs < rhs)
+                {
+                    min_pos = i;
+                }
+            }
+
+            const kmer<N>& current_key = cursors[min_pos].block->k_mers[cursors[min_pos].index];
             if (!has_prev)
             {
                 prev_key = current_key;
@@ -1224,8 +1226,12 @@ private:
                 prev_count = 1;
             }
 
-            winner = lt.advance(winner);
-            ++emitted;
+            ++cursors[min_pos].index;
+            if (cursors[min_pos].index >= cursors[min_pos].block->count)
+            {
+                cursors[min_pos] = cursors[active_cursor_count - 1];
+                --active_cursor_count;
+            }
         }
 
         if (has_prev)
@@ -1244,21 +1250,21 @@ private:
 
     void export_hash_map(FinalDrainWriter& writer, ConcurrentMap<N>* hash_map)
     {
-        // 收集所有元素到 vector
-        std::vector<ExportRecord> records;
+        std::vector<ExportRecord<N>> records;
+        records.reserve(65536); // 预估每个哈希桶的平均记录数，实际可能更少
         for (uint64_t i = 0; i < kmer_concurrent_hash_map_capacity; i++)
         {
             auto node_ptr = hash_map->bucket_head(i).load(std::memory_order_relaxed);
             while (node_ptr != nullptr)
             {
-                records.push_back({node_ptr->k_mer, node_ptr->count.load(std::memory_order_relaxed)});
+                records.push_back({ node_ptr->k_mer, node_ptr->count.load(std::memory_order_relaxed) });
                 node_ptr = node_ptr->next;
             }
         }
         if (records.empty()) return;
 
         std::sort(records.begin(), records.end(),
-            [](const ExportRecord& a, const ExportRecord& b) { return a.key < b.key; });
+            [](const ExportRecord<N>& a, const ExportRecord<N>& b) { return a.key < b.key; });
 
         for (auto& rec : records)
             append_export_record(writer, rec.key, rec.count);

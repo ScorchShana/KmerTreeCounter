@@ -154,6 +154,14 @@ struct alignas(PAGE_SIZE) ExportBlock
     std::array<kmer<N>, EXPORT_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)> k_mers;
 };
 
+// FinalDrain 导出使用的结构体
+template <uint32_t N>
+struct ExportRecord
+{
+    kmer<N> key;
+    uint32_t count;
+};
+
 // 写入k-mer计数
 alignas(CACHE_LINE_SIZE) inline std::atomic<uint64_t> sorted_kmer_count{ 0 };
 
