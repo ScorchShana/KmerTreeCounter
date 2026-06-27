@@ -18,6 +18,7 @@
 #include <utility>
 #include <iostream>
 #include <cstdlib>
+#include <zlib.h>
 
 template <uint32_t N>
 class FastqReader
@@ -48,6 +49,7 @@ class FastqReader
     char left_buffer_[128];       // 块在碱基行中间截断时，保存最后(k-1)个碱基用于下块前缀
     size_t left_buffer_size_ = 0; // left_buffer_中有效碱基字节数
     bool is_gz_file = false; // 是否为 gzip 压缩文件
+    gzFile gzfile_ = nullptr;
 
 public:
 #ifdef TEST_MODE
@@ -72,36 +74,60 @@ public:
             std::cerr << "RingMemoryPool pointer is null" << std::endl;
             std::exit(-1);
         }
+
         fd_ = ::open(filename.data(), O_RDONLY);
         if (fd_ == -1)
         {
             std::cerr << "Failed to open file" << std::endl;
             std::exit(-1);
         }
-
-        posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL); // 顺序访问提示
-
         struct stat st;
         if (fstat(fd_, &st) == -1)
         {
             std::cerr << "Failed to get file size" << std::endl;
             std::exit(-1);
         }
-
         file_size_ = st.st_size;
 
-        file_buffer = static_cast<char*>(std::aligned_alloc(4096, chunk_size_));
+        //判断是否为gz文件
+        unsigned char buf[2];
+        ssize_t n = ::read(fd_, buf, 2);
+        is_gz_file = (n == 2 && buf[0] == 0x1F && buf[1] == 0x8B);
 
+        if(is_gz_file)
+        {
+            gzfile_ = gzopen(filename.c_str(), "rb");
+            if (gzfile_ == nullptr) {
+                std::cerr << "Failed to open gzip file: " << filename << std::endl;
+                std::exit(-1);
+            }
+        }
+
+        else
+        {
+            if (lseek(fd_, 0, SEEK_SET) == -1) {
+                std::cerr << "Failed to seek to beginning" << std::endl;
+                std::exit(-1);
+            }
+
+            posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL); // 顺序访问提示
+        }
+
+        file_buffer = static_cast<char*>(std::aligned_alloc(4096, chunk_size_));
         if (!file_buffer)
         {
-            std::cerr << "Failed to allocate aligned memory for file buffer: " << std::endl;
+            std::cerr << "Failed to allocate aligned memory for file buffe9r: " << std::endl;
             std::exit(-1);
         }
     }
 
     ~FastqReader()
     {
-        if (fd_ != -1)
+        if (gzfile_ != nullptr) 
+        {
+            gzclose(gzfile_);
+        }
+            if (fd_ != -1)
         {
             ::close(fd_);
         }
@@ -143,7 +169,13 @@ public:
 
             if (input_pos >= input_size && !eof)
             {
-                const ssize_t bytes_read = ::read(fd_, file_buffer, chunk_size_);
+                ssize_t bytes_read = 0;
+                if(is_gz_file){
+                    bytes_read = gzread(gzfile_, file_buffer, chunk_size_);
+                }else{
+                    bytes_read = ::read(fd_, file_buffer, chunk_size_);
+                }
+                
                 if (bytes_read < 0) [[unlikely]]
                 {
                     std::cerr << "Failed to read fastq data" << std::endl;
@@ -159,9 +191,10 @@ public:
                     input_pos = 0;
                     input_size = static_cast<uint64_t>(bytes_read);
                     have_read_ += bytes_read;
-
+               
                     // 进度更新频率为每增加1%，或达到100%时更新一次
-                    cur_percent = static_cast<double>(have_read_) / static_cast<double>(file_size_);
+                    double current_read = is_gz_file ? static_cast<double>(gzoffset(gzfile_)) : static_cast<double>(have_read_);
+                    cur_percent = current_read / static_cast<double>(file_size_);
                     int cur_percent_int = static_cast<int>(cur_percent * 100);
                     if (cur_percent_int - last_reported_percent >= 1 || cur_percent_int == 100)
                     {
