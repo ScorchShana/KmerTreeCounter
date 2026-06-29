@@ -303,7 +303,11 @@ private:
         }
 
         const size_t length = static_cast<size_t>(mmap_bytes);
+
+#ifdef TEST_MODE
         std::cout << "attempting to mmap " << length << " bytes with huge pages" << std::endl;
+#endif
+
         void* base = mmap(nullptr,
             length,
             PROT_READ | PROT_WRITE,
@@ -316,7 +320,9 @@ private:
             return base;
         }
 
+#ifdef TEST_MODE
         std::cout << "mmap with huge pages failed, falling back to regular pages" << std::endl;
+#endif
 
         base = mmap(nullptr,
             length,

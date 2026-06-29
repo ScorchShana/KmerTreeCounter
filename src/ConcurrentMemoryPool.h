@@ -75,7 +75,7 @@ constexpr bool is_aligned(size_t value, size_t alignment)
 // 当块被分配时，此空间可供用户使用
 struct FreeBlock
 {
-    FreeBlock *next;
+    FreeBlock* next;
 };
 
 //==============================================================================
@@ -86,16 +86,16 @@ struct FreeBlock
 // 使用 alignas 避免伪共享
 struct alignas(CACHE_LINE_SIZE) Arena
 {
-    void *start_addr; // 本 Arena 的起始地址
-    void *end_addr;   // 本 Arena 的结束地址（不包含）
-    std::atomic<char *> bump_cursor;
-    FreeBlock *central_free_list; // 中央空闲链表
+    void* start_addr; // 本 Arena 的起始地址
+    void* end_addr;   // 本 Arena 的结束地址（不包含）
+    std::atomic<char*> bump_cursor;
+    FreeBlock* central_free_list; // 中央空闲链表
     std::mutex mutex;             // 保护中央空闲链表的互斥锁
 
     Arena() : start_addr(nullptr), end_addr(nullptr), bump_cursor(nullptr), central_free_list(nullptr) {}
 
     // 检查指针是否属于此 Arena
-    bool contains(void *ptr) const
+    bool contains(void* ptr) const
     {
         return ptr >= start_addr && ptr < end_addr;
     }
@@ -104,8 +104,8 @@ struct alignas(CACHE_LINE_SIZE) Arena
     size_t block_count() const
     {
         return static_cast<size_t>(
-                   static_cast<char *>(end_addr) - static_cast<char *>(start_addr)) /
-               BLOCK_SIZE;
+            static_cast<char*>(end_addr) - static_cast<char*>(start_addr)) /
+            BLOCK_SIZE;
     }
 };
 
@@ -116,7 +116,7 @@ struct alignas(CACHE_LINE_SIZE) Arena
 // 用于 ThreadLocalCache 中的远程链表
 struct RemoteListHead
 {
-    FreeBlock *head;
+    FreeBlock* head;
     size_t count;
 
     RemoteListHead() : head(nullptr), count(0) {}
@@ -129,7 +129,7 @@ struct RemoteListHead
 struct ThreadLocalCache
 {
     // 本地空闲栈（使用侵入式链表实现栈）
-    FreeBlock *local_free_stack;
+    FreeBlock* local_free_stack;
     size_t local_free_count;
 
     // 远程链表数组，每个 Arena 一个
@@ -137,14 +137,15 @@ struct ThreadLocalCache
     alignas(CACHE_LINE_SIZE) RemoteListHead remote_lists[MAX_NUMA_NODES];
 
     // 指向本地 Arena 的指针
-    Arena *local_arena;
+    Arena* local_arena;
     int local_arena_index;
 
     // 所属的 ConcurrentMemoryPool 指针（用于归还内存）
-    class ConcurrentMemoryPool *pool;
+    class ConcurrentMemoryPool* pool;
 
     ThreadLocalCache()
-        : local_free_stack(nullptr), local_free_count(0), local_arena(nullptr), local_arena_index(-1), pool(nullptr) {}
+        : local_free_stack(nullptr), local_free_count(0), local_arena(nullptr), local_arena_index(-1), pool(nullptr) {
+    }
 
     // 析构时归还所有缓存
     ~ThreadLocalCache();
@@ -162,32 +163,35 @@ public:
     explicit ConcurrentMemoryPool(size_t total_bytes);
 
     // 禁止拷贝与赋值
-    ConcurrentMemoryPool(const ConcurrentMemoryPool &) = delete;
-    ConcurrentMemoryPool &operator=(const ConcurrentMemoryPool &) = delete;
+    ConcurrentMemoryPool(const ConcurrentMemoryPool&) = delete;
+    ConcurrentMemoryPool& operator=(const ConcurrentMemoryPool&) = delete;
 
     // 析构函数，释放所有 mmap 内存
     ~ConcurrentMemoryPool();
 
     // 分配一个 4KB 块，失败时抛出 std::bad_alloc
-    void *allocate();
+    void* allocate();
 
     // 分配可变大小的块，失败时抛出 std::bad_alloc
-    void *allocate_large(size_t bytes);
+    void* allocate_large(size_t bytes);
 
     // 释放一个之前分配的块
-    void deallocate(void *ptr);
+    void deallocate(void* ptr);
 
     // 在 init_arenas 之前分配大块内存（2MB 对齐），不需要回收
-    void *allocate_before_init_arenas(uint64_t bytes);
+    void* allocate_before_init_arenas(uint64_t bytes);
 
     // 在所有大块分配完成后，用剩余内存初始化各个 Arena
     void init_arenas();
+
+    // 进行first-touch初始化，确保每个NUMA节点的内存被访问
+    void perform_first_touch(size_t num_threads = 0);
 
     // 获取当前线程所属 Arena 的索引
     int get_current_arena_index() const;
 
     // 获取线程本地缓存
-    static ThreadLocalCache &get_thread_local_cache();
+    static ThreadLocalCache& get_thread_local_cache();
 
 private:
     //--------------------------------------------------------------------------
@@ -201,17 +205,17 @@ private:
     void mmap_total_memory(size_t total_bytes);
 
     // 从 Arena 批量获取块，返回实际获取块数（0 表示获取失败）
-    size_t batch_allocate_from_arena(Arena &arena, FreeBlock **out_head, FreeBlock **out_tail, size_t count);
+    size_t batch_allocate_from_arena(Arena& arena, FreeBlock** out_head, FreeBlock** out_tail, size_t count);
 
-    char *bump_allocate_from_arena(Arena &arena, size_t bytes);
+    char* bump_allocate_from_arena(Arena& arena, size_t bytes);
 
-    FreeBlock *batch_allocate_from_bump(Arena &arena, size_t &out_count, FreeBlock **out_tail);
+    FreeBlock* batch_allocate_from_bump(Arena& arena, size_t& out_count, FreeBlock** out_tail);
 
     // 批量归还块到 Arena
-    void batch_deallocate_to_arena(Arena &arena, FreeBlock *head, FreeBlock *tail, size_t count);
+    void batch_deallocate_to_arena(Arena& arena, FreeBlock* head, FreeBlock* tail, size_t count);
 
     // 根据地址查找 Arena 索引
-    int find_arena_index(void *ptr) const;
+    int find_arena_index(void* ptr) const;
 
     // 获取当前线程应该使用的 Arena 索引
     int get_thread_arena_index() const;
@@ -227,13 +231,13 @@ private:
     int num_arenas_;
 
     // mmap 原始起始地址（用于 munmap）
-    void *mmap_base_;
+    void* mmap_base_;
 
     // mmap 原始大小（用于 munmap）
     size_t mmap_size_;
 
     // 可用内存区域起始地址（2MB 对齐）
-    void *memory_start_;
+    void* memory_start_;
 
     // 可用内存区域总大小（2MB 对齐）
     size_t memory_size_;
@@ -254,13 +258,13 @@ private:
     int total_cpus_;
 
     // init_arenas 前已分配的大块偏移
-    alignas(CACHE_LINE_SIZE) std::atomic<size_t> pre_arena_offset_{0};
+    alignas(CACHE_LINE_SIZE) std::atomic<size_t> pre_arena_offset_{ 0 };
 
     // 保护 pre_arena_offset_ 的互斥锁
     std::mutex pre_arena_mutex_;
 
     // Arena 是否已初始化
-    alignas(CACHE_LINE_SIZE) std::atomic<bool> arenas_initialized_{false};
+    alignas(CACHE_LINE_SIZE) std::atomic<bool> arenas_initialized_{ false };
 
     // 线程本地缓存
     static inline thread_local ThreadLocalCache tls_cache_;
@@ -281,7 +285,7 @@ inline ThreadLocalCache::~ThreadLocalCache()
     // 归还本地空闲栈中的所有块
     while (local_free_stack)
     {
-        FreeBlock *block = local_free_stack;
+        FreeBlock* block = local_free_stack;
         local_free_stack = block->next;
         local_free_count--;
 
@@ -289,7 +293,7 @@ inline ThreadLocalCache::~ThreadLocalCache()
         int arena_idx = pool->find_arena_index(block);
         if (arena_idx >= 0 && arena_idx < pool->num_arenas_)
         {
-            Arena &arena = pool->arenas_[arena_idx];
+            Arena& arena = pool->arenas_[arena_idx];
             std::lock_guard<std::mutex> lock(arena.mutex);
             block->next = arena.central_free_list;
             arena.central_free_list = block;
@@ -299,15 +303,15 @@ inline ThreadLocalCache::~ThreadLocalCache()
     // 归还所有远程链表中的块
     for (int i = 0; i < MAX_NUMA_NODES; ++i)
     {
-        RemoteListHead &rl = remote_lists[i];
+        RemoteListHead& rl = remote_lists[i];
         if (rl.head)
         {
             if (i < pool->num_arenas_)
             {
-                Arena &arena = pool->arenas_[i];
+                Arena& arena = pool->arenas_[i];
                 std::lock_guard<std::mutex> lock(arena.mutex);
                 // 将整个链表挂到中央空闲链表
-                FreeBlock *tail = rl.head;
+                FreeBlock* tail = rl.head;
                 while (tail->next)
                 {
                     tail = tail->next;
@@ -348,7 +352,7 @@ inline ConcurrentMemoryPool::~ConcurrentMemoryPool()
 {
     // 清理当前线程的 TLS 缓存（如果有的话）
     // 注意：TLS 析构会在 ConcurrentMemoryPool 析构之后发生，所以需要先清理
-    ThreadLocalCache &tls = tls_cache_;
+    ThreadLocalCache& tls = tls_cache_;
     if (tls.pool == this)
     {
         // 清空本地空闲栈，不归还到 Arena（因为 Arena 即将销毁）
@@ -446,11 +450,12 @@ inline void ConcurrentMemoryPool::mmap_total_memory(size_t total_bytes)
     size_t aligned_size = align_up(total_bytes, huge_page_size);
     size_t request_size = aligned_size + huge_page_size;
 
+
     // 尝试使用大页
-    void *addr = mmap(nullptr, request_size,
-                      PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB,
-                      -1, 0);
+    void* addr = mmap(nullptr, request_size,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB,
+        -1, 0);
 
     if (addr != MAP_FAILED)
     {
@@ -462,9 +467,9 @@ inline void ConcurrentMemoryPool::mmap_total_memory(size_t total_bytes)
     {
         // 大页分配失败，回退到普通页
         addr = mmap(nullptr, request_size,
-                    PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANONYMOUS,
-                    -1, 0);
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1, 0);
 
         if (addr == MAP_FAILED)
         {
@@ -480,10 +485,15 @@ inline void ConcurrentMemoryPool::mmap_total_memory(size_t total_bytes)
         madvise(mmap_base_, mmap_size_, MADV_HUGEPAGE);
     }
 
+
+
+    // 尝试建议使用透明大页
+    madvise(mmap_base_, mmap_size_, MADV_HUGEPAGE);
+
     // 确保 memory_start_ 是 2MB 对齐的
     uintptr_t raw = reinterpret_cast<uintptr_t>(mmap_base_);
     uintptr_t aligned = align_up(raw, huge_page_size);
-    memory_start_ = reinterpret_cast<void *>(aligned);
+    memory_start_ = reinterpret_cast<void*>(aligned);
     memory_size_ = aligned_size;
 
     // 对齐检查
@@ -494,7 +504,7 @@ inline void ConcurrentMemoryPool::mmap_total_memory(size_t total_bytes)
     }
 }
 
-inline void *ConcurrentMemoryPool::allocate_before_init_arenas(uint64_t bytes)
+inline void* ConcurrentMemoryPool::allocate_before_init_arenas(uint64_t bytes)
 {
     if (bytes == 0)
     {
@@ -519,7 +529,7 @@ inline void *ConcurrentMemoryPool::allocate_before_init_arenas(uint64_t bytes)
         std::exit(-1);
     }
 
-    void *ptr = static_cast<char *>(memory_start_) + current_offset;
+    void* ptr = static_cast<char*>(memory_start_) + current_offset;
     pre_arena_offset_ += alloc_size;
 
     // 对齐断言：memory_start_ 是 2MB 对齐，current_offset 也是 2MB 对齐增长
@@ -545,22 +555,22 @@ inline void ConcurrentMemoryPool::init_arenas()
     constexpr size_t huge_page_size = 2 * 1024 * 1024;
 
     size_t used = pre_arena_offset_;
-    char *arena_start = static_cast<char *>(memory_start_) + used;
+    char* arena_start = static_cast<char*>(memory_start_) + used;
 
     // 由于 memory_start_ 是 2MB 对齐，used 也是 2MB 对齐增长，
     // arena_start 自然满足 4KB 对齐。此处保留断言以防万一。
     if (!is_aligned(reinterpret_cast<uintptr_t>(arena_start), BLOCK_SIZE))
     {
-        arena_start = reinterpret_cast<char *>(align_up(reinterpret_cast<uintptr_t>(arena_start), BLOCK_SIZE));
+        arena_start = reinterpret_cast<char*>(align_up(reinterpret_cast<uintptr_t>(arena_start), BLOCK_SIZE));
     }
 
     size_t arena_area_bytes = memory_size_ - used;
-    if (arena_area_bytes <= static_cast<size_t>(arena_start - static_cast<char *>(memory_start_)))
+    if (arena_area_bytes <= static_cast<size_t>(arena_start - static_cast<char*>(memory_start_)))
     {
         std::cerr << "No memory left for arenas" << std::endl;
         std::exit(-1);
     }
-    arena_area_bytes -= static_cast<size_t>(arena_start - static_cast<char *>(memory_start_));
+    arena_area_bytes -= static_cast<size_t>(arena_start - static_cast<char*>(memory_start_));
 
     total_blocks_ = arena_area_bytes / BLOCK_SIZE;
     if (total_blocks_ == 0)
@@ -569,7 +579,7 @@ inline void ConcurrentMemoryPool::init_arenas()
         std::exit(-1);
     }
 
-    char *current_addr = arena_start;
+    char* current_addr = arena_start;
     size_t remaining_blocks = total_blocks_;
 
     for (int i = 0; i < num_arenas_; ++i)
@@ -603,7 +613,93 @@ inline void ConcurrentMemoryPool::init_arenas()
     arenas_initialized_.store(true, std::memory_order_release);
 }
 
-inline char *ConcurrentMemoryPool::bump_allocate_from_arena(Arena &arena, size_t bytes)
+// something wrong
+void ConcurrentMemoryPool::perform_first_touch(size_t num_threads)
+{
+    if (!num_threads) {
+        num_threads = total_cpus_;  // 或 std::thread::hardware_concurrency()
+    }
+    // 限制不超过 total_cpus_，避免过多线程
+    num_threads = std::min<size_t>(num_threads, total_cpus_);
+
+    // 如果 num_threads 为 0（比如 total_cpus_=0），则直接用单线程 touch 所有内存
+    if (num_threads == 0) num_threads = 1;
+
+    std::vector<int> threads_per_arena(num_arenas_, 0);
+    int remaining = static_cast<int>(num_threads);
+    for (int i = 0; i < num_arenas_; ++i)
+    {
+        if (i == num_arenas_ - 1)
+        {
+            threads_per_arena[i] = remaining;
+        }
+        else
+        {
+            threads_per_arena[i] = (num_threads * cpus_per_node_[i]) / total_cpus_;
+            // 若该节点无 CPU，则不分配线程（避免绑定失败）
+            if (cpus_per_node_[i] == 0)
+            {
+                threads_per_arena[i] = 0;
+            }
+            else if (threads_per_arena[i] < 1)
+            {
+                threads_per_arena[i] = 1;
+            }
+            remaining -= threads_per_arena[i];
+        }
+    }
+    // 确保剩余线程分配到最后一个节点（即使它无 CPU）
+    if (remaining > 0)
+    {
+        threads_per_arena[num_arenas_ - 1] += remaining;
+    }
+
+    std::vector<std::thread> threads;
+    for (int arena_idx = 0; arena_idx < num_arenas_; ++arena_idx)
+    {
+        if (threads_per_arena[arena_idx] == 0) continue;
+        Arena& arena = arenas_[arena_idx];
+        size_t arena_bytes = static_cast<char*>(arena.end_addr) -
+            static_cast<char*>(arena.start_addr);
+        size_t pages = arena_bytes / page_size_;
+        if (pages == 0) continue;
+
+        size_t pages_per_thread = pages / threads_per_arena[arena_idx];
+        if (pages_per_thread == 0) pages_per_thread = 1; // 至少 touch 一页
+
+        for (int rank = 0; rank < threads_per_arena[arena_idx]; ++rank)
+        {
+            threads.emplace_back([this, arena_idx, rank, pages, pages_per_thread, threads_per_arena]() {
+#if HAS_LIBNUMA
+                if (numa_available_ && cpus_per_node_[arena_idx] > 0)
+                {
+                    if (numa_run_on_node(arena_idx) != 0)
+                    {
+                        // 绑定失败，记录警告，但不影响 touch（可能分配在错误节点）
+                        // 可考虑使用 mbind 作为 fallback
+                    }
+                }
+#endif
+                char* start = static_cast<char*>(arenas_[arena_idx].start_addr);
+                size_t start_page = rank * pages_per_thread;
+                size_t end_page = (rank == threads_per_arena[arena_idx] - 1) ?
+                    pages : (rank + 1) * pages_per_thread;
+                // 确保不超过 pages
+                if (end_page > pages) end_page = pages;
+
+                for (size_t p = start_page; p < end_page; ++p)
+                {
+                    volatile char* vp = start + p * page_size_;
+                    *vp = 0;  // 强制写入，触发物理页分配
+                }
+                });
+        }
+    }
+
+    for (auto& t : threads) t.join();
+}
+
+inline char* ConcurrentMemoryPool::bump_allocate_from_arena(Arena& arena, size_t bytes)
 {
     if (bytes == 0)
     {
@@ -611,11 +707,11 @@ inline char *ConcurrentMemoryPool::bump_allocate_from_arena(Arena &arena, size_t
     }
 
     size_t aligned_bytes = align_up(bytes, BLOCK_SIZE);
-    char *arena_end = static_cast<char *>(arena.end_addr);
+    char* arena_end = static_cast<char*>(arena.end_addr);
 
     for (;;)
     {
-        char *cursor = arena.bump_cursor.load(std::memory_order_relaxed);
+        char* cursor = arena.bump_cursor.load(std::memory_order_relaxed);
         if (!cursor)
         {
             return nullptr;
@@ -627,29 +723,29 @@ inline char *ConcurrentMemoryPool::bump_allocate_from_arena(Arena &arena, size_t
             return nullptr;
         }
 
-        char *next = cursor + aligned_bytes;
+        char* next = cursor + aligned_bytes;
 
         if (arena.bump_cursor.compare_exchange_weak(cursor, next,
-                                                    std::memory_order_relaxed,
-                                                    std::memory_order_relaxed))
+            std::memory_order_relaxed,
+            std::memory_order_relaxed))
         {
             return cursor;
         }
     }
 }
 
-inline FreeBlock *ConcurrentMemoryPool::batch_allocate_from_bump(Arena &arena, size_t &out_count, FreeBlock **out_tail)
+inline FreeBlock* ConcurrentMemoryPool::batch_allocate_from_bump(Arena& arena, size_t& out_count, FreeBlock** out_tail)
 {
     if (out_count == 0)
     {
         return nullptr;
     }
 
-    char *arena_end = static_cast<char *>(arena.end_addr);
+    char* arena_end = static_cast<char*>(arena.end_addr);
 
     for (;;)
     {
-        char *cursor = arena.bump_cursor.load(std::memory_order_relaxed);
+        char* cursor = arena.bump_cursor.load(std::memory_order_relaxed);
         if (!cursor || cursor >= arena_end)
         {
             out_count = 0;
@@ -666,18 +762,18 @@ inline FreeBlock *ConcurrentMemoryPool::batch_allocate_from_bump(Arena &arena, s
 
         size_t allocate_blocks = std::min(out_count, available_blocks);
         size_t allocate_bytes = allocate_blocks * BLOCK_SIZE;
-        char *next = cursor + allocate_bytes;
+        char* next = cursor + allocate_bytes;
 
         if (arena.bump_cursor.compare_exchange_weak(cursor, next,
-                                                    std::memory_order_relaxed,
-                                                    std::memory_order_relaxed))
+            std::memory_order_relaxed,
+            std::memory_order_relaxed))
         {
-            FreeBlock *head = reinterpret_cast<FreeBlock *>(cursor);
-            FreeBlock *tail = head;
+            FreeBlock* head = reinterpret_cast<FreeBlock*>(cursor);
+            FreeBlock* tail = head;
 
             for (size_t i = 1; i < allocate_blocks; ++i)
             {
-                FreeBlock *block = reinterpret_cast<FreeBlock *>(cursor + i * BLOCK_SIZE);
+                FreeBlock* block = reinterpret_cast<FreeBlock*>(cursor + i * BLOCK_SIZE);
                 tail->next = block;
                 tail = block;
             }
@@ -690,10 +786,10 @@ inline FreeBlock *ConcurrentMemoryPool::batch_allocate_from_bump(Arena &arena, s
     }
 }
 
-inline size_t ConcurrentMemoryPool::batch_allocate_from_arena(Arena &arena, FreeBlock **out_head, FreeBlock **out_tail, size_t count)
+inline size_t ConcurrentMemoryPool::batch_allocate_from_arena(Arena& arena, FreeBlock** out_head, FreeBlock** out_tail, size_t count)
 {
-    FreeBlock *head = nullptr;
-    FreeBlock *tail = nullptr;
+    FreeBlock* head = nullptr;
+    FreeBlock* tail = nullptr;
     size_t fetched = 0;
 
     {
@@ -736,7 +832,7 @@ inline size_t ConcurrentMemoryPool::batch_allocate_from_arena(Arena &arena, Free
     return bump_count;
 }
 
-inline void ConcurrentMemoryPool::batch_deallocate_to_arena(Arena &arena, FreeBlock *head, FreeBlock *tail, size_t /*count*/)
+inline void ConcurrentMemoryPool::batch_deallocate_to_arena(Arena& arena, FreeBlock* head, FreeBlock* tail, size_t /*count*/)
 {
     if (!head || !tail)
         return;
@@ -746,7 +842,7 @@ inline void ConcurrentMemoryPool::batch_deallocate_to_arena(Arena &arena, FreeBl
     arena.central_free_list = head;
 }
 
-inline int ConcurrentMemoryPool::find_arena_index(void *ptr) const
+inline int ConcurrentMemoryPool::find_arena_index(void* ptr) const
 {
     // 线性搜索（Arena 数量很少，最多 16 个）
     for (int i = 0; i < num_arenas_; ++i)
@@ -778,12 +874,12 @@ inline int ConcurrentMemoryPool::get_thread_arena_index() const
     return 0;
 }
 
-inline ThreadLocalCache &ConcurrentMemoryPool::get_thread_local_cache()
+inline ThreadLocalCache& ConcurrentMemoryPool::get_thread_local_cache()
 {
     return tls_cache_;
 }
 
-inline void *ConcurrentMemoryPool::allocate_large(size_t bytes)
+inline void* ConcurrentMemoryPool::allocate_large(size_t bytes)
 {
     if (bytes == 0)
     {
@@ -796,7 +892,7 @@ inline void *ConcurrentMemoryPool::allocate_large(size_t bytes)
         std::exit(-1);
     }
 
-    ThreadLocalCache &tls = tls_cache_;
+    ThreadLocalCache& tls = tls_cache_;
 
     // 初始化 TLS（首次访问）
     if (!tls.pool) [[unlikely]]
@@ -806,7 +902,7 @@ inline void *ConcurrentMemoryPool::allocate_large(size_t bytes)
         tls.local_arena = &arenas_[tls.local_arena_index];
     }
 
-    char *ptr = bump_allocate_from_arena(*tls.local_arena, bytes);
+    char* ptr = bump_allocate_from_arena(*tls.local_arena, bytes);
     if (ptr)
     {
         return ptr;
@@ -830,7 +926,7 @@ inline void *ConcurrentMemoryPool::allocate_large(size_t bytes)
     std::exit(-1);
 }
 
-inline void *ConcurrentMemoryPool::allocate()
+inline void* ConcurrentMemoryPool::allocate()
 {
     if (!arenas_initialized_.load(std::memory_order_acquire))
     {
@@ -838,9 +934,9 @@ inline void *ConcurrentMemoryPool::allocate()
         std::exit(-1);
     }
 
-    ThreadLocalCache &tls = tls_cache_;
+    ThreadLocalCache& tls = tls_cache_;
 
-    FreeBlock *head, *tail;
+    FreeBlock* head, * tail;
     size_t fetched = 0;
 
     // 初始化 TLS（首次访问）
@@ -856,7 +952,7 @@ inline void *ConcurrentMemoryPool::allocate()
         // 1. 尝试从本地空闲栈分配
         if (tls.local_free_stack) [[likely]]
         {
-            FreeBlock *block = tls.local_free_stack;
+            FreeBlock* block = tls.local_free_stack;
             tls.local_free_stack = block->next;
             tls.local_free_count--;
             return block;
@@ -869,7 +965,7 @@ inline void *ConcurrentMemoryPool::allocate()
     if (fetched > 0)
     {
         // 第一个块立即返回
-        FreeBlock *result = head;
+        FreeBlock* result = head;
 
         // 直接挂接剩余链表，避免额外遍历与反转
         tls.local_free_stack = head->next;
@@ -889,7 +985,7 @@ inline void *ConcurrentMemoryPool::allocate()
         fetched = batch_allocate_from_arena(arenas_[candidate], &head, &tail, BATCH_SIZE);
         if (fetched > 0)
         {
-            FreeBlock *result = head;
+            FreeBlock* result = head;
 
             // 与本地 refill 分支保持一致：直接挂接剩余链表
             tls.local_free_stack = head->next;
@@ -904,7 +1000,7 @@ inline void *ConcurrentMemoryPool::allocate()
     std::exit(-1);
 }
 
-inline void ConcurrentMemoryPool::deallocate(void *ptr)
+inline void ConcurrentMemoryPool::deallocate(void* ptr)
 {
     if (!ptr)
         return;
@@ -915,7 +1011,7 @@ inline void ConcurrentMemoryPool::deallocate(void *ptr)
         std::exit(-1);
     }
 
-    ThreadLocalCache &tls = tls_cache_;
+    ThreadLocalCache& tls = tls_cache_;
 
     // 初始化 TLS（首次访问）
     if (!tls.pool)
@@ -925,7 +1021,7 @@ inline void ConcurrentMemoryPool::deallocate(void *ptr)
         tls.local_arena = &arenas_[tls.local_arena_index];
     }
 
-    FreeBlock *block = reinterpret_cast<FreeBlock *>(ptr);
+    FreeBlock* block = reinterpret_cast<FreeBlock*>(ptr);
 
     // 查找块属于哪个 Arena
     int arena_idx = find_arena_index(ptr);
@@ -949,13 +1045,13 @@ inline void ConcurrentMemoryPool::deallocate(void *ptr)
         {
             // 栈已满，批量归还一半
             size_t half = TLS_CAPACITY / 2;
-            FreeBlock *tail = tls.local_free_stack;
+            FreeBlock* tail = tls.local_free_stack;
             for (size_t i = 1; i < half && tail->next; ++i)
             {
                 tail = tail->next;
             }
 
-            FreeBlock *remaining = tail->next;
+            FreeBlock* remaining = tail->next;
             tail->next = nullptr;
 
             batch_deallocate_to_arena(*tls.local_arena, tls.local_free_stack, tail, half);
@@ -972,7 +1068,7 @@ inline void ConcurrentMemoryPool::deallocate(void *ptr)
     else
     {
         // 远程 Arena
-        RemoteListHead &rl = tls.remote_lists[arena_idx];
+        RemoteListHead& rl = tls.remote_lists[arena_idx];
         block->next = rl.head;
         rl.head = block;
         rl.count++;
@@ -980,9 +1076,9 @@ inline void ConcurrentMemoryPool::deallocate(void *ptr)
         if (rl.count >= REMOTE_LIST_CAPACITY)
         {
             // 批量归还到远程 Arena
-            FreeBlock *head = rl.head;
+            FreeBlock* head = rl.head;
             // 找到尾节点
-            FreeBlock *tail = head;
+            FreeBlock* tail = head;
             while (tail->next)
             {
                 tail = tail->next;

@@ -1251,7 +1251,22 @@ private:
 
     void export_hash_map(FinalDrainWriter& writer, ConcurrentMap<N>* hash_map)
     {
-        thread_local std::vector<ExportRecord<N>> records;
+
+        for (uint64_t i = 0; i < kmer_concurrent_hash_map_capacity; i++)
+        {
+            ExportRecord<N> record;
+            auto node_ptr = hash_map->bucket_head(i).load(std::memory_order_relaxed);
+            while (node_ptr != nullptr)
+            {
+                record.key = node_ptr->k_mer;
+                record.count = node_ptr->count.load(std::memory_order_relaxed);
+                append_export_record(writer, record.key, record.count);
+                node_ptr = node_ptr->next;
+            }
+        }
+
+
+        /*thread_local std::vector<ExportRecord<N>> records;
         records.clear();
         records.reserve(kmer_concurrent_hash_map_capacity); // 预估每个哈希桶的平均记录数，实际可能更少
 
@@ -1285,6 +1300,7 @@ private:
         }
         // for (auto& rec : records)
         //     append_export_record(writer, rec.key, rec.count);
+        */
     }
 
     void ensure_spare_block()

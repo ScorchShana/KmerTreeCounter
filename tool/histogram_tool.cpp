@@ -414,7 +414,8 @@ namespace
         std::ofstream output(output_filename, std::ios::out | std::ios::trunc);
         if (!output)
         {
-            throw std::runtime_error("failed to open output file: " + output_filename);
+            std::cerr << "failed to open output file: " << output_filename << std::endl;
+            exit(1);
         }
 
         for (size_t i = 0; i < histogram.size(); ++i)
