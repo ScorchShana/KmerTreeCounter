@@ -19,6 +19,7 @@
 #include <utility>
 #include <iostream>
 #include <algorithm>
+#include <zlib.h>
 
 template <uint32_t N>
 class FastqPreReader
@@ -48,6 +49,7 @@ class FastqPreReader
     char left_buffer_[128];       // 块在碱基行中间截断时，保存最后(k-1)个碱基用于下块前缀
     size_t left_buffer_size_ = 0; // left_buffer_中有效碱基字节数
     bool is_gz_file = false; // 是否为 gzip 压缩文件
+    gzFile gzfile_ = nullptr;
 
 public:
     int k;
@@ -73,8 +75,6 @@ public:
             std::exit(-1);
         }
 
-        posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL); // 顺序访问提示
-
         struct stat st;
         if (fstat(fd_, &st) == -1)
         {
@@ -84,6 +84,29 @@ public:
 
         file_size_ = st.st_size;
 
+        unsigned char buf[2];
+        ssize_t n = ::read(fd_, buf, 2);
+        is_gz_file = (n == 2 && buf[0] == 0x1F && buf[1] == 0x8B);
+
+        if(is_gz_file)
+        {
+            gzfile_ = gzopen(filename.c_str(), "rb");
+            if (gzfile_ == nullptr) {
+                std::cerr << "Failed to open gzip file: " << filename << std::endl;
+                std::exit(-1);
+            }
+        }
+
+        else
+        {
+            if (lseek(fd_, 0, SEEK_SET) == -1) {
+                std::cerr << "Failed to seek to beginning" << std::endl;
+                std::exit(-1);
+            }
+
+             posix_fadvise(fd_, 0, 0, POSIX_FADV_RANDOM); // 随机访问提示 
+        }
+
         need_read_ = std::min(file_size_, (ssize_t)256U * 1024 * 1024);
 
         file_buffer = new char[chunk_size_];
@@ -91,7 +114,11 @@ public:
 
     ~FastqPreReader()
     {
-        if (fd_ != -1)
+        if (gzfile_ != nullptr) 
+        {
+            gzclose(gzfile_);
+        }
+            if (fd_ != -1)
         {
             ::close(fd_);
         }
@@ -117,6 +144,26 @@ public:
         bool eof = false;
         bool stop = false;
 
+        // 分段
+        uint64_t part_size = need_read_ / 3;
+        if (part_size == 0) part_size = 1;
+        ssize_t segment_need = static_cast<ssize_t>(part_size);
+        int current_segment = 0;
+        ssize_t segment_bytes_read = 0;
+
+        if (part_size > chunk_size_ && !is_gz_file) {
+            delete[] file_buffer;
+            file_buffer = new char[part_size];
+            chunk_size_ = part_size;
+        }
+
+        off_t offsets[3];
+        offsets[0] = 0;
+        offsets[1] = (file_size_ / 2) - static_cast<off_t>(part_size / 2);
+        if (offsets[1] < 0) offsets[1] = 0;
+        offsets[2] = file_size_ - static_cast<off_t>(part_size);
+        if (offsets[2] < 0) offsets[2] = 0;
+
         while (!stop)
         {
             if (!has_block)
@@ -126,22 +173,61 @@ public:
 
             if (input_pos >= input_size && !eof)
             {
-                const auto bytes_read = ::read(fd_, file_buffer, chunk_size_);
+                ssize_t bytes_read = 0;
+                if(is_gz_file){
+                    bytes_read = gzread(gzfile_, file_buffer, chunk_size_);
+                }else{
+                    bytes_read = ::read(fd_, file_buffer, chunk_size_);
+                }
+
                 if (bytes_read < 0) [[unlikely]]
                 {
                     std::cerr << "Failed to read fastq data" << std::endl;
                     std::exit(-1);
                 }
 
-                if (bytes_read == 0 || have_read_ >= need_read_) [[unlikely]]
+                if (is_gz_file)
                 {
-                    eof = true;
+                    // gz不变
+                    if (bytes_read == 0 || have_read_ >= need_read_) [[unlikely]]
+                    {
+                        eof = true;
+                    }
+                    else
+                    {
+                        input_pos = 0;
+                        input_size = static_cast<uint64_t>(bytes_read);
+                        have_read_ += bytes_read;
+                    }
                 }
                 else
                 {
-                    input_pos = 0;
-                    input_size = static_cast<uint64_t>(bytes_read);
-                    have_read_ += bytes_read;
+                    // 读取三段
+                    if (bytes_read == 0) [[unlikely]]
+                    {
+                        eof = true;
+                    }
+                    else
+                    {
+                        input_pos = 0;
+                        input_size = static_cast<uint64_t>(bytes_read);
+                        segment_bytes_read += bytes_read;
+                        have_read_ += bytes_read;
+
+                        if (segment_bytes_read >= segment_need && current_segment < 2)
+                        {
+                            state_ = State::ReadHeader;
+                            left_buffer_size_ = 0;
+                            ++current_segment;
+                            segment_bytes_read = 0;
+                            find_next_record_start(offsets[current_segment]);
+                        }
+
+                        if (have_read_ >= need_read_)
+                        {
+                            eof = true;
+                        }
+                    }
                 }
             }
 
@@ -240,6 +326,26 @@ public:
     }
 
 private:
+    // 找到第一个 \n@ 的位置
+    off_t find_next_record_start(off_t start_pos)
+    {
+        if (lseek(fd_, start_pos, SEEK_SET) == -1) return start_pos;
+        char buf[65536];
+        ssize_t n = ::read(fd_, buf, sizeof(buf));
+        if (n <= 1) { lseek(fd_, start_pos, SEEK_SET); return start_pos; }
+        for (ssize_t i = 1; i < n; ++i)
+        {
+            if (buf[i - 1] == '\n' && buf[i] == '@')
+            {
+                off_t aligned = start_pos + static_cast<off_t>(i);
+                lseek(fd_, aligned, SEEK_SET);
+                return aligned;
+            }
+        }
+        lseek(fd_, start_pos, SEEK_SET);
+        return start_pos;
+    }
+
     State advance_state_on_newline(const State current) const
     {
         switch (current)
