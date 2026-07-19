@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -219,14 +220,9 @@ namespace
         return options;
     }
 
-    [[nodiscard]] std::string root_filename(const std::string& tmp_dir, const uint64_t root_id)
+    [[nodiscard]] std::string high_filename(const std::string& tmp_dir)
     {
-        return tmp_dir + "root_" + std::to_string(root_id) + ".bin";
-    }
-
-    [[nodiscard]] std::string thread_filename(const std::string& tmp_dir, const uint64_t thread_id)
-    {
-        return tmp_dir + "thread_" + std::to_string(thread_id) + ".bin";
+        return tmp_dir + "high.bin";
     }
 
     void close_fd(const int fd) noexcept
@@ -253,34 +249,46 @@ namespace
     }
     
     template <uint32_t N>
-    [[nodiscard]] std::vector<RootFileInfo> collect_thread_files(
+    [[nodiscard]] std::vector<RootFileInfo> collect_high_files(
         const std::string& tmp_dir, uint64_t& expected_unique_insert, uint32_t k_len)
     {
         const uint64_t compact_record_size = packed_kmer_bytes_for_k<N>(k_len) + sizeof(uint32_t);
-        std::vector<RootFileInfo> thread_files;
+        std::vector<RootFileInfo> high_files;
 
-        for (uint64_t thread_id = 0; ; ++thread_id)
+        const std::string filename = high_filename(tmp_dir);
+        const int fd = ::open(filename.c_str(), O_RDONLY);
+        if (fd < 0)
         {
-            const std::string filename = thread_filename(tmp_dir, thread_id);
-            const int fd = ::open(filename.c_str(), O_RDONLY);
-            if (fd < 0) break;
-
-            struct stat st{};
-            if (::fstat(fd, &st) != 0) { close_fd(fd); break; }
-            close_fd(fd);
-
-            const uint64_t file_size = static_cast<uint64_t>(st.st_size);
-            if (file_size == 0) continue;
-            if (file_size % compact_record_size != 0)
-            {
-                std::cerr << "invalid thread file size for " << filename << std::endl;
-                exit(-1);
-            }
-            const uint64_t record_count = file_size / compact_record_size;
-            expected_unique_insert += record_count;
-            thread_files.push_back(RootFileInfo{ filename, record_count, file_size });
+            std::cerr << "failed to open " << filename << ": " << std::strerror(errno) << std::endl;
+            exit(-1);
         }
-        return thread_files;
+
+        struct stat st{};
+        if (::fstat(fd, &st) != 0)
+        {
+            close_fd(fd);
+            std::cerr << "failed to stat " << filename << ": " << std::strerror(errno) << std::endl;
+            exit(-1);
+        }
+        close_fd(fd);
+
+        const uint64_t file_size = static_cast<uint64_t>(st.st_size);
+        if (file_size == 0)
+        {
+            std::cerr << "empty high.bin file" << std::endl;
+            exit(-1);
+        }
+        if (file_size % compact_record_size != 0)
+        {
+            std::cerr << "invalid high.bin file size: " << file_size
+                      << " is not divisible by compact record size " << compact_record_size << std::endl;
+            exit(-1);
+        }
+        const uint64_t record_count = file_size / compact_record_size;
+        expected_unique_insert += record_count;
+        high_files.push_back(RootFileInfo{ filename, record_count, file_size });
+
+        return high_files;
     }
 
     template <uint32_t N>
@@ -339,7 +347,7 @@ namespace
 
     template <uint32_t N>
     void enqueue_high_records(
-        const std::vector<RootFileInfo>& root_files,
+        const std::vector<RootFileInfo>& high_files,
         SPMCRingMemoryPool<HISTOGRAM_RING_CAPACITY>& pool,
         uint32_t k_len,
         ProgressPrinter* progress)
@@ -349,10 +357,10 @@ namespace
         static_assert(RECORDS_PER_BLOCK > 0, "histogram high-frequency block is too small");
         const uint64_t compact_rec_size = packed_kmer_bytes_for_k<N>(k_len) + sizeof(uint32_t);
 
-        for (const RootFileInfo& root_file : root_files)
+        for (const RootFileInfo& high_file : high_files)
         {
             FinalDrainReader<N> reader(k_len);
-            reader.open(root_file.filename);
+            reader.open(high_file.filename);
 
             while (!reader.finished())
             {
@@ -429,8 +437,261 @@ namespace
         }
     }
 
+    // Expand compact k-mer records from raw bytes (used by streaming path).
     template <uint32_t N>
-    int run_precise_histogram_tool(const Options& options)
+    static void expand_compact_records(
+        const char* src, uint64_t count, ExportRecord<N>* out,
+        uint32_t full_words, uint32_t tail_bytes, uint64_t kmer_bytes)
+    {
+        for (uint64_t i = 0; i < count; ++i)
+        {
+            const char* record = src + i * (kmer_bytes + sizeof(uint32_t));
+            ExportRecord<N>& dst = out[i];
+            dst.key.reset();
+            std::memcpy(dst.key.data.data(), record, full_words * sizeof(uint64_t));
+            if (tail_bytes > 0)
+            {
+                uint64_t tail = 0;
+                std::memcpy(reinterpret_cast<char*>(&tail) + (8 - tail_bytes),
+                            record + full_words * sizeof(uint64_t), tail_bytes);
+                dst.key.data[full_words] = tail;
+            }
+            std::memcpy(&dst.count, record + kmer_bytes, sizeof(uint32_t));
+        }
+    }
+
+    void write_histogram(
+        const std::string& output_filename,
+        const AtomicHistogram& histogram,
+        const uint32_t min_freq);
+
+    // Streaming-segment fallback for insufficient memory.
+    // Splits high.bin into segments that each fit in the hash map.
+    // For each segment, streams ALL of low.bin to merge counts.
+    template <uint32_t N>
+    int run_streaming_precise_histogram_tool(const Options& options)
+    {
+        const size_t hist_size = static_cast<size_t>(
+            static_cast<uint64_t>(options.max_freq) - static_cast<uint64_t>(options.min_freq) + 1ULL);
+        const uint32_t worker_count = std::max<uint32_t>(1, options.max_threads);
+        const uint32_t k_len = options.k_len;
+
+        const uint32_t full_words = k_len / BASES_PER_U64T;
+        const uint32_t tail_bits = 2 * (k_len % BASES_PER_U64T);
+        const uint32_t tail_bytes = (tail_bits + 7) / 8;
+        const uint64_t kmer_bytes = full_words * sizeof(uint64_t) + tail_bytes;
+        const uint64_t compact_rec_size = kmer_bytes + sizeof(uint32_t);
+
+        // Open and mmap high.bin
+        const std::string high_path = options.tmp_dir + "high.bin";
+        int high_fd = ::open(high_path.c_str(), O_RDONLY);
+        if (high_fd < 0)
+        {
+            std::cerr << "streaming: failed to open " << high_path << '\n';
+            exit(-1);
+        }
+        struct stat high_st {};
+        ::fstat(high_fd, &high_st);
+        const uint64_t high_file_size = static_cast<uint64_t>(high_st.st_size);
+        const uint64_t total_high_records = high_file_size / compact_rec_size;
+
+        const char* high_mapped = static_cast<const char*>(
+            ::mmap(nullptr, high_file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, high_fd, 0));
+        ::close(high_fd);
+        if (high_mapped == MAP_FAILED)
+        {
+            std::cerr << "streaming: mmap high.bin failed\n";
+            exit(-1);
+        }
+
+        // Open and mmap low.bin
+        const std::string low_path = options.tmp_dir + "low.bin";
+        int low_fd = ::open(low_path.c_str(), O_RDONLY);
+        if (low_fd < 0)
+        {
+            std::cerr << "streaming: failed to open " << low_path << '\n';
+            ::munmap(const_cast<char*>(high_mapped), high_file_size);
+            exit(-1);
+        }
+        struct stat low_st {};
+        ::fstat(low_fd, &low_st);
+        const uint64_t low_file_size = static_cast<uint64_t>(low_st.st_size);
+        const uint64_t total_low_kmers = low_file_size / kmer_bytes;
+
+        const char* low_mapped = static_cast<const char*>(
+            ::mmap(nullptr, low_file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, low_fd, 0));
+        ::close(low_fd);
+        if (low_mapped == MAP_FAILED)
+        {
+            std::cerr << "streaming: mmap low.bin failed\n";
+            ::munmap(const_cast<char*>(high_mapped), high_file_size);
+            exit(-1);
+        }
+
+        // Compute segment count: reduce records_per_segment until hash map fits
+        const uint64_t histogram_overhead =
+            static_cast<uint64_t>(hist_size) * sizeof(std::atomic<int64_t>)
+            + static_cast<uint64_t>(hist_size) * sizeof(int64_t) * worker_count
+            + 4ULL * 1024 * 1024;  // 4MB I/O slack
+
+        uint32_t num_segments = 1;
+        while (num_segments < 1024)
+        {
+            const uint64_t records_per_seg =
+                (total_high_records + num_segments - 1) / num_segments;
+            const uint64_t hash_mem =
+                FlatConcurrentHashMap<N>::required_mmap_bytes(records_per_seg);
+            if (hash_mem + histogram_overhead <= options.max_memory_bytes)
+                break;
+            num_segments *= 2;
+        }
+        if (num_segments >= 1024)
+        {
+            std::cerr << "streaming: even with 1024 segments, hash map won't fit in "
+                      << options.max_memory_bytes << " bytes\n";
+            ::munmap(const_cast<char*>(high_mapped), high_file_size);
+            ::munmap(const_cast<char*>(low_mapped), low_file_size);
+            return 2;
+        }
+
+        std::cout << "Streaming mode: " << total_high_records << " high records in "
+                  << num_segments << " segment(s)" << std::endl;
+
+        AtomicHistogram global_histogram(hist_size);
+        init_histogram(global_histogram);
+        std::atomic<uint64_t> total_matched{0};
+
+        const uint64_t records_per_segment =
+            (total_high_records + num_segments - 1) / num_segments;
+
+        for (uint32_t seg = 0; seg < num_segments; ++seg)
+        {
+            const uint64_t seg_start = seg * records_per_segment;
+            const uint64_t seg_end = std::min(seg_start + records_per_segment, total_high_records);
+            const uint64_t seg_count = seg_end - seg_start;
+            if (seg_count == 0) continue;
+
+            std::cout << "Segment " << (seg + 1) << "/" << num_segments
+                      << " (" << seg_count << " records)" << std::endl;
+
+            FlatConcurrentHashMap<N> hash_map(seg_count, worker_count);
+            std::atomic<uint64_t> next_chunk{0};
+            constexpr uint64_t CHUNK_SIZE = 65536;
+
+            // Phase A: Insert this segment's high records into hash map
+            std::vector<std::thread> workers;
+            workers.reserve(worker_count);
+            for (uint32_t t = 0; t < worker_count; ++t)
+            {
+                workers.emplace_back([&]()
+                {
+                    std::vector<ExportRecord<N>> buffer(CHUNK_SIZE);
+                    std::vector<int64_t> local_hist(hist_size, 0);
+                    for (;;)
+                    {
+                        uint64_t chunk_idx = next_chunk.fetch_add(1, std::memory_order_relaxed);
+                        const uint64_t chunk_start = seg_start + chunk_idx * CHUNK_SIZE;
+                        if (chunk_start >= seg_end) break;
+                        const uint64_t chunk_end = std::min(chunk_start + CHUNK_SIZE, seg_end);
+                        const uint64_t n = chunk_end - chunk_start;
+
+                        const char* src = high_mapped + chunk_start * compact_rec_size;
+                        expand_compact_records<N>(src, n, buffer.data(),
+                                                   full_words, tail_bytes, kmer_bytes);
+                        for (uint64_t i = 0; i < n; ++i)
+                        {
+                            const uint64_t c = buffer[i].count;
+                            if (c >= options.min_freq && c <= options.max_freq)
+                                local_hist[static_cast<size_t>(c - options.min_freq)] += 1;
+                            hash_map.insert_unique(buffer[i].key, buffer[i].count);
+                        }
+                    }
+                    for (size_t j = 0; j < hist_size; ++j)
+                        if (local_hist[j] != 0)
+                            global_histogram[j].fetch_add(local_hist[j], std::memory_order_relaxed);
+                });
+            }
+            for (auto& w : workers) w.join();
+
+            hash_map.seal();
+
+            // Phase B: Stream ALL of low.bin, query hash map
+            next_chunk.store(0, std::memory_order_relaxed);
+            workers.clear();
+            for (uint32_t t = 0; t < worker_count; ++t)
+            {
+                workers.emplace_back([&]()
+                {
+                    std::vector<int64_t> local_hist(hist_size, 0);
+                    uint64_t local_matched = 0;
+                    kmer<N> key{};
+
+                    for (;;)
+                    {
+                        uint64_t chunk_idx = next_chunk.fetch_add(1, std::memory_order_relaxed);
+                        const uint64_t chunk_start = chunk_idx * CHUNK_SIZE;
+                        if (chunk_start >= total_low_kmers) break;
+                        const uint64_t chunk_end = std::min(chunk_start + CHUNK_SIZE, total_low_kmers);
+
+                        for (uint64_t i = chunk_start; i < chunk_end; ++i)
+                        {
+                            const char* record = low_mapped + i * kmer_bytes;
+                            key.reset();
+                            const uint64_t full_bytes = full_words * sizeof(uint64_t);
+                            if (full_bytes > 0)
+                                std::memcpy(key.data.data(), record, full_bytes);
+                            if (tail_bytes > 0)
+                            {
+                                uint64_t tail = 0;
+                                std::memcpy(reinterpret_cast<char*>(&tail) + (8 - tail_bytes),
+                                            record + full_bytes, tail_bytes);
+                                key.data[full_words] = tail;
+                            }
+
+                            auto lookup = hash_map.prepare_lookup(key);
+                            hash_map.prefetch(lookup);
+                            uint32_t stored_count = 0;
+                            if (hash_map.find_prepared(key, lookup, stored_count))
+                            {
+                                if (stored_count >= options.min_freq && stored_count <= options.max_freq)
+                                    local_hist[static_cast<size_t>(stored_count - options.min_freq)] -= 1;
+                                const uint64_t merged = static_cast<uint64_t>(stored_count) + 1;
+                                if (merged >= options.min_freq && merged <= options.max_freq)
+                                    local_hist[static_cast<size_t>(merged - options.min_freq)] += 1;
+                                local_matched++;
+                            }
+                        }
+                    }
+                    for (size_t j = 0; j < hist_size; ++j)
+                        if (local_hist[j] != 0)
+                            global_histogram[j].fetch_add(local_hist[j], std::memory_order_relaxed);
+                    total_matched.fetch_add(local_matched, std::memory_order_relaxed);
+                });
+            }
+            for (auto& w : workers) w.join();
+        }
+
+        // Adjust cnt[1] for low kmers that never matched any high record
+        const uint64_t unmatched = total_low_kmers - total_matched.load(std::memory_order_relaxed);
+        if (options.min_freq <= 1 && 1 <= options.max_freq)
+        {
+            const size_t idx1 = static_cast<size_t>(1 - options.min_freq);
+            global_histogram[idx1].fetch_add(static_cast<int64_t>(unmatched), std::memory_order_relaxed);
+        }
+
+        std::cout << "Matched " << total_matched << " low kmers, "
+                  << unmatched << " unmatched (freq=1)" << std::endl;
+
+        write_histogram(options.output_file, global_histogram, options.min_freq);
+
+        ::munmap(const_cast<char*>(high_mapped), high_file_size);
+        ::munmap(const_cast<char*>(low_mapped), low_file_size);
+        return 0;
+    }
+
+    // Core precise processing without memory check (ring-pool-based).
+    template <uint32_t N>
+    int run_precise_histogram_tool_impl(const Options& options)
     {
         temp_dir = options.tmp_dir;
 
@@ -439,30 +700,17 @@ namespace
         const uint32_t worker_count = std::max<uint32_t>(1, options.max_threads);
 
         uint64_t expected_unique_insert = 0;
-        auto root_files = collect_thread_files<N>(options.tmp_dir, expected_unique_insert, options.k_len);
+        auto high_files = collect_high_files<N>(options.tmp_dir, expected_unique_insert, options.k_len);
         uint64_t high_file_bytes = 0;
-        for (const RootFileInfo& root_file : root_files)
-        {
-            high_file_bytes += root_file.file_size;
-        }
+        for (const RootFileInfo& high_file : high_files)
+            high_file_bytes += high_file.file_size;
 
         const uint64_t low_file_bytes = low_file_size_bytes<N>(options.tmp_dir, options.k_len);
         const uint64_t packed_low_kmer_bytes = packed_kmer_bytes_for_k<N>(options.k_len);
         ProgressPrinter progress(high_file_bytes + low_file_bytes);
 
-        const uint64_t estimated_peak_memory =
-            estimate_peak_memory_bytes<N>(expected_unique_insert, worker_count, hist_size);
-        if (estimated_peak_memory > options.max_memory_bytes)
-        {
-            std::cerr << "insufficient-memory path is not implemented\n"
-                << "estimated_peak_memory_bytes=" << estimated_peak_memory
-                << " max_memory_bytes=" << options.max_memory_bytes << '\n';
-            return 2;
-        }
-
         AtomicHistogram global_histogram(hist_size);
         init_histogram(global_histogram);
-
 
         FlatConcurrentHashMap<N> hash_map(expected_unique_insert, worker_count);
         progress.start();
@@ -470,19 +718,11 @@ namespace
         {
             SPMCRingMemoryPool<HISTOGRAM_RING_CAPACITY> high_pool(HISTOGRAM_BLOCK_BYTES, 1);
             HighFrequencyInsertThreadPool<N, HISTOGRAM_RING_CAPACITY> high_threads(
-                &high_pool,
-                &hash_map,
-                &global_histogram,
-                worker_count,
-                options.k_len,
-                options.min_freq,
-                options.max_freq,
-                hist_size);
-
+                &high_pool, &hash_map, &global_histogram,
+                worker_count, options.k_len, options.min_freq, options.max_freq, hist_size);
             high_threads.start();
-            enqueue_high_records<N>(root_files, high_pool, options.k_len, &progress);
+            enqueue_high_records<N>(high_files, high_pool, options.k_len, &progress);
             high_threads.join();
-
             if (high_threads.insert_failed())
             {
                 std::cerr << "failed to insert one or more high-frequency records" << std::endl;
@@ -495,15 +735,8 @@ namespace
         {
             SPMCRingMemoryPool<HISTOGRAM_RING_CAPACITY> low_pool(HISTOGRAM_BLOCK_BYTES, 1);
             LowFrequencyQueryThreadPool<N, HISTOGRAM_RING_CAPACITY> low_threads(
-                &low_pool,
-                &hash_map,
-                &global_histogram,
-                worker_count,
-                options.k_len,
-                options.min_freq,
-                options.max_freq,
-                hist_size);
-
+                &low_pool, &hash_map, &global_histogram,
+                worker_count, options.k_len, options.min_freq, options.max_freq, hist_size);
             low_threads.start();
             enqueue_low_kmers<N>(options.k_len, low_pool, packed_low_kmer_bytes, &progress);
             low_threads.join();
@@ -512,6 +745,32 @@ namespace
         write_histogram(options.output_file, global_histogram, options.min_freq);
         progress.finish();
         return 0;
+    }
+
+    // Public entry point: checks memory, falls back to streaming if needed.
+    template <uint32_t N>
+    int run_precise_histogram_tool(const Options& options)
+    {
+        temp_dir = options.tmp_dir;
+
+        const size_t hist_size = static_cast<size_t>(
+            static_cast<uint64_t>(options.max_freq) - static_cast<uint64_t>(options.min_freq) + 1ULL);
+        const uint32_t worker_count = std::max<uint32_t>(1, options.max_threads);
+
+        uint64_t expected_unique_insert = 0;
+        (void)collect_high_files<N>(options.tmp_dir, expected_unique_insert, options.k_len);
+
+        const uint64_t estimated_peak_memory =
+            estimate_peak_memory_bytes<N>(expected_unique_insert, worker_count, hist_size);
+        if (estimated_peak_memory > options.max_memory_bytes)
+        {
+            std::cout << "estimated_peak_memory_bytes=" << estimated_peak_memory
+                << " exceeds max_memory_bytes=" << options.max_memory_bytes
+                << ", falling back to streaming mode" << std::endl;
+            return run_streaming_precise_histogram_tool<N>(options);
+        }
+
+        return run_precise_histogram_tool_impl<N>(options);
     }
 
     int precise_dispatch_by_k_len(const Options& options)
@@ -544,11 +803,11 @@ namespace
         const uint32_t worker_count = std::max<uint32_t>(1, options.max_threads);
 
         uint64_t expected_unique_insert = 0;
-        auto root_files = collect_thread_files<N>(options.tmp_dir, expected_unique_insert, options.k_len);
+        auto high_files = collect_high_files<N>(options.tmp_dir, expected_unique_insert, options.k_len);
         uint64_t high_file_bytes = 0;
-        for (const RootFileInfo& root_file : root_files)
+        for (const RootFileInfo& high_file : high_files)
         {
-            high_file_bytes += root_file.file_size;
+            high_file_bytes += high_file.file_size;
         }
 
         ProgressPrinter progress(high_file_bytes);
@@ -570,7 +829,7 @@ namespace
                 hist_size);
 
             approximate_threads.start();
-            enqueue_high_records<N>(root_files, approximate_pool, options.k_len, &progress);
+            enqueue_high_records<N>(high_files, approximate_pool, options.k_len, &progress);
             approximate_threads.join();
         }
 
