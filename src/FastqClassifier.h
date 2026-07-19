@@ -143,7 +143,7 @@ public:
                     not_first_flag = true;
 #endif
 
-                    dequeue_backoff.decay();
+                    dequeue_backoff.double_decay();
 
 
                     kmer<N>* kmer_data = reinterpret_cast<kmer<N> *>(content.data);
@@ -160,12 +160,12 @@ public:
                     if (parser_classifier_ring_pool->consumer_try_enqueue(content.data))
                     {
                         // 无等待
-                        enqueue_backoff.decay();
+                        enqueue_backoff.double_decay();
                     }
                     else
                     {
                         // 自旋等待
-                        enqueue_backoff.decay();
+                        enqueue_backoff.backoff();
 
                         while (!parser_classifier_ring_pool->consumer_try_enqueue(content.data))
                         {
@@ -174,6 +174,8 @@ public:
 #endif
                             enqueue_backoff.backoff();
                         }
+
+                        enqueue_backoff.decay();
                     }
                 }
                 else
@@ -592,7 +594,7 @@ private:
 
         if (export_pool->producer_try_enqueue(content))
         {
-            enqueue_to_export_writer_backoff.decay();
+            enqueue_to_export_writer_backoff.double_decay();
             return;
         }
 
@@ -604,6 +606,8 @@ private:
 #endif
             enqueue_to_export_writer_backoff.backoff();
         }
+
+        enqueue_to_export_writer_backoff.decay();
     }
 
     void dequeue_data_to_export_writer(char*& data)
@@ -612,7 +616,7 @@ private:
 
         if (export_pool->producer_try_dequeue(data))
         {
-            dequeue_from_export_writer_backoff.decay();
+            dequeue_from_export_writer_backoff.double_decay();
             return;
         }
 
@@ -624,6 +628,8 @@ private:
 #endif
             dequeue_from_export_writer_backoff.backoff();
         }
+
+        dequeue_from_export_writer_backoff.decay();
     }
 };
 

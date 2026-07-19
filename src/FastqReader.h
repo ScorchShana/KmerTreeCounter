@@ -4,6 +4,7 @@
 #include "definition.h"
 #include "RingMemoryPool.h"
 #include "SPSCRingQueue.h"
+#include "SpinBackoff.h"
 
 #include <cassert>
 #include <cstdio>
@@ -45,7 +46,7 @@ class FastqReader
     State state_ = State::ReadHeader;
     int fd_ = -1;
     off_t file_size_ = 0;
-    std::atomic<off_t> have_read_{0};
+    std::atomic<off_t> have_read_{ 0 };
     uint64_t chunk_size_;
     std::vector<std::string> filenames_;
     size_t file_index_ = 0;
@@ -114,7 +115,7 @@ public:
             io_thread_ = std::thread(&FastqReader::io_thread_func, this);
 
             // 解析线程: 始终从 pipeline queue 取数据
-            ::content_type current_input{nullptr, 0};
+            ::content_type current_input{ nullptr, 0 };
             bool have_input = false;
             parse_loop(current_input, have_input);
 
@@ -136,7 +137,7 @@ private:
     {
         const std::string& fname = filenames_[file_index_];
         std::cout << "FastqReader: " << (file_index_ + 1) << "/"
-                  << filenames_.size() << ": " << fname << std::endl;
+            << filenames_.size() << ": " << fname << std::endl;
 
         fd_ = ::open(fname.data(), O_RDONLY);
         if (fd_ == -1) { std::cerr << "Failed to open: " << fname << std::endl; std::exit(-1); }
@@ -197,10 +198,10 @@ private:
             if (bytes_read == 0)
             {
                 pipeline_free_queue_.enqueue(buf);
-                pipeline_data_queue_.enqueue({nullptr, 0});
+                pipeline_data_queue_.enqueue({ nullptr, 0 });
                 break;
             }
-            pipeline_data_queue_.enqueue({buf, static_cast<uint64_t>(bytes_read)});
+            pipeline_data_queue_.enqueue({ buf, static_cast<uint64_t>(bytes_read) });
         }
     }
 
@@ -361,6 +362,9 @@ class ReaderThreadPool
     uint32_t reader_count_;
     std::vector<std::unique_ptr<std::thread>> threads_;
 
+    inline static thread_local SpinBackoff<> enqueue_backoff;
+    inline static thread_local SpinBackoff<> dequeue_backoff;
+
 public:
     explicit ReaderThreadPool(
         const std::vector<std::string>& filenames,
@@ -392,7 +396,7 @@ public:
         {
             threads_.push_back(std::make_unique<std::thread>([this, assigned = std::move(assignments[i])]() {
                 reader_worker(assigned);
-            }));
+                }));
         }
     }
 
@@ -428,25 +432,61 @@ private:
     }
 
     inline void acquire_block(char*& block_ptr, uint64_t& write_size, uint64_t& last_newline_pos,
-                               bool& has_block, size_t& left_buffer_size_, char* left_buffer_)
+        bool& has_block, size_t& left_buffer_size_, char* left_buffer_)
     {
-        ring_pool_ptr_->producer_dequeue(block_ptr);
+        if (ring_pool_ptr_->producer_try_dequeue(block_ptr))
+        {
+            dequeue_backoff.double_decay();
+        }
+        else
+        {
+            while (!ring_pool_ptr_->producer_try_dequeue(block_ptr))
+            {
+                dequeue_backoff.backoff();
+            }
+            dequeue_backoff.decay();
+        }
+
+
         has_block = true; write_size = 0; last_newline_pos = kNoNewlineInBlock;
-        if (left_buffer_size_ > 0) { std::memcpy(block_ptr, left_buffer_, left_buffer_size_); write_size = left_buffer_size_; left_buffer_size_ = 0; }
+        if (left_buffer_size_ > 0)
+        {
+            std::memcpy(block_ptr, left_buffer_, left_buffer_size_);
+            write_size = left_buffer_size_;
+            left_buffer_size_ = 0;
+        }
     }
 
     inline void publish_current_block(char*& block_ptr, uint64_t& write_size,
-                                       uint64_t& last_newline_pos, bool& has_block)
+        uint64_t& last_newline_pos, bool& has_block)
     {
         if (!has_block) return;
-        if (write_size > 0) ring_pool_ptr_->producer_enqueue({ block_ptr, write_size });
+
+        if (write_size > 0) {
+            if (ring_pool_ptr_->producer_try_enqueue({ block_ptr, write_size }))
+            {
+                enqueue_backoff.double_decay();
+            }
+            else
+            {
+                while (!ring_pool_ptr_->producer_try_enqueue({ block_ptr, write_size }))
+                {
+                    enqueue_backoff.backoff();
+                }
+                enqueue_backoff.decay();
+            }
+        }
         else ring_pool_ptr_->consumer_enqueue(block_ptr);
-        has_block = false; block_ptr = nullptr; write_size = 0; last_newline_pos = kNoNewlineInBlock;
+
+        has_block = false;
+        block_ptr = nullptr;
+        write_size = 0;
+        last_newline_pos = kNoNewlineInBlock;
     }
 
     inline void store_overlap_from_block_end(const char* block_ptr, uint64_t write_size,
-                                              uint64_t last_newline_pos, uint64_t overlap,
-                                              size_t& left_buffer_size_, char* left_buffer_)
+        uint64_t last_newline_pos, uint64_t overlap,
+        size_t& left_buffer_size_, char* left_buffer_)
     {
         left_buffer_size_ = 0;
         if (overlap == 0 || write_size == 0) return;

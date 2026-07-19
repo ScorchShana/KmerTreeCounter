@@ -122,14 +122,14 @@ public:
                     not_first_flag = true;
 #endif
 
-                    dequeue_backoff.decay();
+                    dequeue_backoff.double_decay();
 
                     parse(reader_parser_content.data, reader_parser_content.length);
 
                     if (reader_parser_ring_pool->consumer_try_enqueue(reader_parser_content.data))
                     {
                         // enqueue 无等待
-                        enqueue_backoff.decay();
+                        enqueue_backoff.double_decay();
                     }
                     else
                     {
@@ -145,6 +145,8 @@ public:
 
                             enqueue_backoff.backoff();
                         }
+
+                        enqueue_backoff.decay();
                     }
                 }
                 else
@@ -615,7 +617,13 @@ private:
 
         if (classifier_task_queues[owner_id]->try_enqueue(owner_contents[owner_id]))
         {
-            enqueue_to_classifier_backoff.decay();
+            enqueue_to_classifier_backoff.double_decay();
+            return;
+        }
+
+        if (global_classifier_task_queue->try_enqueue(owner_contents[owner_id]))
+        {
+            enqueue_to_classifier_backoff.double_decay();
             return;
         }
 
@@ -632,7 +640,6 @@ private:
             {
                 break;
             }
-            enqueue_to_classifier_backoff.backoff();
             if (global_classifier_task_queue->try_enqueue(owner_contents[owner_id]))
             {
                 break;
@@ -640,6 +647,8 @@ private:
             enqueue_to_classifier_backoff.backoff();
 
         }
+
+        enqueue_to_classifier_backoff.decay();
     }
 
     void dequeue_data_from_classifier(char*& data)
@@ -647,7 +656,7 @@ private:
 
         if (parser_classifier_ring_pool->producer_try_dequeue(data))
         {
-            dequeue_from_classifier_backoff.decay();
+            dequeue_from_classifier_backoff.double_decay();
             return;
         }
 
@@ -663,6 +672,8 @@ private:
             dequeue_from_classifier_backoff.backoff();
 
         }
+
+        dequeue_from_classifier_backoff.decay();
     }
 };
 

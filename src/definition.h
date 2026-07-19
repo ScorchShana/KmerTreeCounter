@@ -97,6 +97,10 @@ constexpr uint64_t KMER_BATCH_SIZE = 1024; // KmerBatch 的总大小（字节）
 constexpr uint64_t EXPORT_FILES_SIZE = 1ULL << (2 * ROOT_BASES); // 最大同时打开文件数量
 constexpr uint64_t EXPORT_ROOT_BUFFER_SIZE = 512 * 1024;         // 每个根节点的导出缓冲区大小（字节）
 
+// FinalDrain 环形内存池配置
+constexpr uint64_t FINAL_DRAIN_RING_POOL_CAPACITY = 1ULL << 10;     // 1024 块
+constexpr uint64_t FINAL_DRAIN_RING_POOL_BLOCK_SIZE = 128ULL * 1024; // 128KB/块
+
 static_assert(KMER_BIN_SIZE < KMER_BLOCK_SIZE, "KMER_BIN_SIZE must be less than KMER_BLOCK_SIZE");
 static_assert(KMER_BIN_SIZE < KMER_BLOCK_SIZE, "KMER_BIN_SIZE must be less than KMER_BLOCK_SIZE");
 

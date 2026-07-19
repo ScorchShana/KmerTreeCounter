@@ -105,6 +105,7 @@ public:
         {
             open_current_file();
             need_read_ = std::min(file_size_, per_file_limit);
+            have_read_.store(0, std::memory_order_relaxed);
 
             if (file_buffer) { delete[] file_buffer; file_buffer = nullptr; }
             io_thread_ = std::thread(&FastqPreReader::io_thread_func, this);
