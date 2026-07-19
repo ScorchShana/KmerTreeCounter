@@ -5,9 +5,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -20,6 +22,7 @@
 #include <unistd.h>
 
 #include "FlatConcurrentHashMap.h"
+#include "Partition.h"
 
 namespace
 {
@@ -528,13 +531,10 @@ namespace
         }
         return opts;
     }
-    static std::string root_filename(const std::string &dir, uint64_t root_id)
+
+    static std::string high_filename(const std::string &dir)
     {
-        return dir + "root_" + std::to_string(root_id) + ".bin";
-    }
-    static std::string thread_filename(const std::string &dir, uint64_t thread_id)
-    {
-        return dir + "thread_" + std::to_string(thread_id) + ".bin";
+        return dir + "high" + ".bin";
     }
 
     template <uint32_t N>
@@ -554,7 +554,7 @@ namespace
 
     // Read compact k-mer records from file and expand to full ExportRecord<N>
     template <uint32_t N>
-    static uint64_t read_compact_root_records(
+    static uint64_t read_compact_high_records(
         int fd, uint64_t file_offset, uint64_t count,
         ExportRecord<N>* out, uint32_t k_len)
     {
@@ -570,7 +570,7 @@ namespace
                             static_cast<off_t>(file_offset * compact_rec));
         if (n != static_cast<ssize_t>(total_bytes))
         {
-            std::cerr << "short read reading compact root records\n";
+            std::cerr << "short read reading compact high records\n";
             exit(-1);
         }
 
@@ -592,37 +592,49 @@ namespace
         return total_bytes;
     }
 
-    // collect thread file data
+    // collect high file data
     template <uint32_t N>
-    static std::vector<RootFileInfo> collect_thread_files(const std::string &tmp_dir,
+    static std::vector<RootFileInfo> collect_high_files(const std::string &tmp_dir,
                                                           uint64_t &total_records,
                                                           uint32_t k_len)
     {
         const uint64_t compact_rec = packed_kmer_bytes<N>(k_len) + sizeof(uint32_t);
         std::vector<RootFileInfo> files;
-        for (uint64_t id = 0; ; ++id)
+
+        std::string path = high_filename(tmp_dir);
+        int fd = ::open(path.c_str(), O_RDONLY);
+        if (fd < 0)
         {
-            std::string path = thread_filename(tmp_dir, id);
-            int fd = ::open(path.c_str(), O_RDONLY);
-            if (fd < 0) break;
-            struct stat st{};
-            ::fstat(fd, &st);
-            ::close(fd);
-            uint64_t size = static_cast<uint64_t>(st.st_size);
-            if (size == 0) continue;
-            if (size % compact_rec != 0)
-            {
-                std::cerr << "bad thread file size: " << path << '\n';
-                exit(-1);
-            }
-            uint64_t records = size / compact_rec;
-            total_records += records;
-            files.push_back({std::move(path), records, size});
+            std::cerr << "failed to open " << path << ": " << std::strerror(errno) << '\n';
+            exit(-1);
         }
+        struct stat st{};
+        if (::fstat(fd, &st) != 0)
+        {
+            std::cerr << "failed to stat " << path << ": " << std::strerror(errno) << '\n';
+            ::close(fd);
+            exit(-1);
+        }
+        ::close(fd);
+        uint64_t size = static_cast<uint64_t>(st.st_size);
+        if (size == 0)
+        {
+            std::cerr << "empty high.bin file\n";
+            exit(-1);
+        }
+        if (size % compact_rec != 0)
+        {
+            std::cerr << "bad high file size: " << path << '\n';
+            exit(-1);
+        }
+        uint64_t records = size / compact_rec;
+        total_records += records;
+        files.push_back({std::move(path), records, size});
+
         return files;
     }
 
-    // build hash map from root files
+    // build hash map from high files
     template <uint32_t N>
     static void build_hash_map(const std::vector<RootFileInfo> &files,
                                FlatConcurrentHashMap<N> &hash_map,
@@ -655,7 +667,7 @@ namespace
                 while (remaining > 0)
                 {
                     uint64_t batch = std::min<uint64_t>(remaining, 65536);
-                    uint64_t bytes = read_compact_root_records<N>(fd, offset, batch,
+                    uint64_t bytes = read_compact_high_records<N>(fd, offset, batch,
                                                                   buffer.data(), k_len);
                     for (uint64_t i = 0; i < batch; ++i)
                         if (in_range(buffer[i].count, min_freq, max_freq))
@@ -787,8 +799,8 @@ namespace
         const uint64_t tail_bytes = (2ULL * (k_len % BASES_PER_U64T) + 7) / 8;
         uint64_t kmers_per_worker = (total_kmers + worker_count - 1) / worker_count;
 
-        std::vector<std::vector<ExportRecord<N>>> thread_results(worker_count);
-        for (auto &v : thread_results)
+        std::vector<std::vector<ExportRecord<N>>> high_results(worker_count);
+        for (auto &v : high_results)
             v.reserve(total_kmers / worker_count + 1024);
 
         std::vector<std::thread> workers;
@@ -800,7 +812,7 @@ namespace
             uint64_t start = tid * kmers_per_worker;
             uint64_t end   = std::min(start + kmers_per_worker, total_kmers);
             if (start >= end) return;
-            auto& local = thread_results[tid];
+            auto& local = high_results[tid];
             kmer<N> key{};
 
             for (uint64_t i = start; i < end; ++i) {
@@ -838,10 +850,10 @@ namespace
         ::munmap(const_cast<char *>(mapped), file_size);
 
         uint64_t total = 0;
-        for (auto &v : thread_results)
+        for (auto &v : high_results)
             total += v.size();
         results.reserve(results.size() + total);
-        for (auto &v : thread_results)
+        for (auto &v : high_results)
         {
             results.insert(results.end(), v.begin(), v.end());
             v.clear();
@@ -873,6 +885,204 @@ namespace
                                 {
         if (count > 0 && in_range(count, min_freq, max_freq))
             results.push_back({key, count}); });
+    }
+
+    // ── Partition-based fallback for insufficient memory ──
+
+    template <uint32_t N>
+    static uint32_t compute_partition_bits(uint64_t total_records,
+                                           uint64_t max_memory_bytes)
+    {
+        for (uint32_t P = 1; P <= 10; ++P)
+        {
+            const uint64_t records_per_bucket =
+                (total_records + (1ULL << P) - 1) / (1ULL << P);
+            const uint64_t estimated_mem =
+                FlatConcurrentHashMap<N>::required_mmap_bytes(records_per_bucket);
+
+            // Add conservative overhead for mmap/low-file mmap/thread buffers
+            constexpr uint64_t overhead = 64ULL * 1024 * 1024;
+
+            if (estimated_mem + overhead <= max_memory_bytes)
+            {
+                return P;
+            }
+        }
+        return 0;
+    }
+
+    // Multi-way merge of sorted partition outputs
+    static void merge_sorted_outputs(const std::vector<std::string>& input_files,
+                                     const std::string& output_file)
+    {
+        struct HeapEntry
+        {
+            std::string line;
+            size_t file_idx;
+            bool operator<(const HeapEntry& other) const
+            {
+                // Min-heap: smaller k-mer string should come first
+                return line > other.line;
+            }
+        };
+
+        // Use raw pointers since we manage lifetime locally
+        std::vector<std::ifstream*> streams;
+        std::priority_queue<HeapEntry> heap;
+
+        for (size_t i = 0; i < input_files.size(); ++i)
+        {
+            auto* s = new std::ifstream(input_files[i]);
+            streams.push_back(s);
+            std::string line;
+            if (std::getline(*s, line))
+            {
+                heap.push({std::move(line), i});
+            }
+        }
+
+        std::ofstream out(output_file, std::ios::out | std::ios::trunc);
+        if (!out)
+        {
+            std::cerr << "merge_sorted_outputs: failed to open " << output_file << '\n';
+            for (auto* s : streams) { s->close(); delete s; }
+            std::exit(1);
+        }
+
+        while (!heap.empty())
+        {
+            auto entry = heap.top();
+            heap.pop();
+            out << entry.line << '\n';
+
+            std::string next_line;
+            if (std::getline(*streams[entry.file_idx], next_line))
+            {
+                heap.push({std::move(next_line), entry.file_idx});
+            }
+        }
+
+        for (auto* s : streams)
+        {
+            s->close();
+            delete s;
+        }
+    }
+
+    // Concatenate partition outputs (already prefix-ordered)
+    static void concat_outputs(const std::vector<std::string>& input_files,
+                               const std::string& output_file)
+    {
+        std::ofstream out(output_file, std::ios::out | std::ios::trunc | std::ios::binary);
+        if (!out)
+        {
+            std::cerr << "concat_outputs: failed to open " << output_file << '\n';
+            std::exit(1);
+        }
+
+        std::vector<char> buf(4ULL * 1024 * 1024);
+        for (const auto& path : input_files)
+        {
+            std::ifstream in(path, std::ios::binary);
+            while (in)
+            {
+                in.read(buf.data(), buf.size());
+                out.write(buf.data(), in.gcount());
+            }
+        }
+    }
+
+    template <uint32_t N>
+    static int run_partitioned_precise(const Options& opts)
+    {
+        // Count total high records
+        uint64_t total_high_records = 0;
+        (void)collect_high_files<N>(opts.tmp_dir, total_high_records, opts.k_len);
+
+        const uint32_t P = compute_partition_bits<N>(total_high_records, opts.max_memory_bytes);
+        if (P == 0)
+        {
+            std::cerr << "insufficient memory: even at P=10 (1024 partitions), "
+                << "estimated memory still exceeds " << opts.max_memory_bytes << " bytes\n";
+            return 2;
+        }
+
+        const uint64_t num_partitions = 1ULL << P;
+        std::cout << "Using P=" << P << " (" << num_partitions
+                  << " partitions) to fit in " << opts.max_memory_bytes << " bytes"
+                  << std::endl;
+
+        // Phase 1: Partition high.bin and low.bin
+        const auto high_counts = partition::partition_high_file<N>(
+            opts.tmp_dir, P, opts.k_len);
+        const auto low_counts = partition::partition_low_file<N>(
+            opts.tmp_dir, P, opts.k_len);
+
+        // Phase 2: Process each partition independently
+        std::vector<std::string> part_outputs;
+        part_outputs.reserve(num_partitions);
+
+        for (uint64_t i = 0; i < num_partitions; ++i)
+        {
+            if (high_counts[i] == 0 && low_counts[i] == 0)
+            {
+                const std::string empty_marker = opts.tmp_dir + "partition_" + std::to_string(i) + "/empty";
+                part_outputs.push_back(empty_marker);
+                continue;
+            }
+
+            const std::string part_dir = opts.tmp_dir + "partition_" + std::to_string(i) + "/";
+            const std::string part_output = part_dir + "output.txt";
+
+            Options part_opts = opts;
+            part_opts.tmp_dir = part_dir;
+            part_opts.output_file = part_output;
+
+            std::cout << "Processing partition " << i << "/" << num_partitions
+                      << " (high=" << high_counts[i] << ", low=" << low_counts[i] << ")"
+                      << std::endl;
+
+            run_precise_impl<N>(part_opts);
+            part_outputs.push_back(part_output);
+        }
+
+        // Phase 3: Merge partition outputs
+        // Filter out empty partitions
+        std::vector<std::string> real_outputs;
+        for (const auto& p : part_outputs)
+        {
+            struct stat st {};
+            if (::stat(p.c_str(), &st) == 0 && st.st_size > 0)
+            {
+                real_outputs.push_back(p);
+            }
+        }
+
+        if (opts.sort_output)
+        {
+            std::cout << "Merging " << real_outputs.size()
+                      << " sorted partition outputs..." << std::endl;
+            merge_sorted_outputs(real_outputs, opts.output_file);
+        }
+        else
+        {
+            std::cout << "Concatenating " << real_outputs.size()
+                      << " partition outputs..." << std::endl;
+            concat_outputs(real_outputs, opts.output_file);
+        }
+
+        // Phase 4: Clean up partition files
+        for (uint64_t i = 0; i < num_partitions; ++i)
+        {
+            const std::string part_dir = opts.tmp_dir + "partition_" + std::to_string(i) + "/";
+            std::remove((part_dir + "high.bin").c_str());
+            std::remove((part_dir + "low.bin").c_str());
+            std::remove((part_dir + "output.txt").c_str());
+            ::rmdir(part_dir.c_str());
+        }
+
+        std::cout << "Partitioned dump complete." << std::endl;
+        return 0;
     }
 
     // ── Phase 4  sort records then write through AsyncWriter
@@ -939,19 +1149,19 @@ namespace
         writer.finish();
     }
 
-    // Precise mode
+    // Precise mode — core processing (no memory check).
     template <uint32_t N>
-    static int run_precise(const Options &opts)
+    static int run_precise_impl(const Options &opts)
     {
         temp_dir = opts.tmp_dir;
         uint32_t wc = std::max<uint32_t>(1, opts.max_threads);
         uint64_t pkb = packed_kmer_bytes<N>(opts.k_len);
 
-        // Collect thread file metadata
-        uint64_t total_root_records = 0;
-        auto root_files = collect_thread_files<N>(opts.tmp_dir, total_root_records, opts.k_len);
+        // Collect high file metadata
+        uint64_t total_high_records = 0;
+        auto high_files = collect_high_files<N>(opts.tmp_dir, total_high_records, opts.k_len);
         uint64_t high_bytes = 0;
-        for (auto &rf : root_files)
+        for (auto &rf : high_files)
             high_bytes += rf.file_size;
 
         // Check low.bin
@@ -978,18 +1188,9 @@ namespace
         ProgressPrinter progress(high_bytes + low_bytes);
         progress.start();
 
-        // Memory check
-        uint64_t estimated_mem = FlatConcurrentHashMap<N>::required_mmap_bytes(total_root_records);
-        if (estimated_mem > opts.max_memory_bytes)
-        {
-            std::cerr << "insufficient memory: need ~" << estimated_mem
-                      << " have " << opts.max_memory_bytes << '\n';
-            return 2;
-        }
-
         // build hash map
-        FlatConcurrentHashMap<N> hash_map(total_root_records, wc);
-        build_hash_map<N>(root_files, hash_map, wc,
+        FlatConcurrentHashMap<N> hash_map(total_high_records, wc);
+        build_hash_map<N>(high_files, hash_map, wc,
                           opts.min_freq, opts.max_freq, opts.k_len, &progress);
         hash_map.seal();
 
@@ -1020,6 +1221,28 @@ namespace
         return 0;
     }
 
+    // Precise mode — public entry point with memory check.
+    template <uint32_t N>
+    static int run_precise(const Options &opts)
+    {
+        temp_dir = opts.tmp_dir;
+
+        uint64_t total_high_records = 0;
+        (void)collect_high_files<N>(opts.tmp_dir, total_high_records, opts.k_len);
+
+        // Memory check
+        uint64_t estimated_mem = FlatConcurrentHashMap<N>::required_mmap_bytes(total_high_records);
+        if (estimated_mem > opts.max_memory_bytes)
+        {
+            std::cout << "estimated memory " << estimated_mem
+                      << " exceeds max " << opts.max_memory_bytes
+                      << ", falling back to partitioned mode" << std::endl;
+            return run_partitioned_precise<N>(opts);
+        }
+
+        return run_precise_impl<N>(opts);
+    }
+
     // Approximate mode
     template <uint32_t N>
     static int run_approximate(const Options &opts)
@@ -1028,9 +1251,9 @@ namespace
         uint32_t wc = std::max<uint32_t>(1, opts.max_threads);
 
         uint64_t total_records = 0;
-        auto root_files = collect_thread_files<N>(opts.tmp_dir, total_records, opts.k_len);
+        auto high_files = collect_high_files<N>(opts.tmp_dir, total_records, opts.k_len);
         uint64_t total_bytes = 0;
-        for (auto &rf : root_files)
+        for (auto &rf : high_files)
             total_bytes += rf.file_size;
 
         ProgressPrinter progress(total_bytes);
@@ -1040,21 +1263,21 @@ namespace
         {
             // Collect all matching records, compute sort keys, global sort, write
             using KeyT = typename SortKeyType<N>::type;
-            std::vector<std::vector<ExportRecord<N>>> thread_results(wc);
-            for (auto &v : thread_results)
+            std::vector<std::vector<ExportRecord<N>>> high_results(wc);
+            for (auto &v : high_results)
                 v.reserve(total_records / wc + 1024);
             std::atomic<uint64_t> next_file{0};
 
             auto worker = [&](uint32_t tid)
             {
                 std::vector<ExportRecord<N>> buffer(65536);
-                auto &local = thread_results[tid];
+                auto &local = high_results[tid];
                 for (;;)
                 {
                     uint64_t index = next_file.fetch_add(1, std::memory_order_relaxed);
-                    if (index >= root_files.size())
+                    if (index >= high_files.size())
                         break;
-                    const RootFileInfo &info = root_files[index];
+                    const RootFileInfo &info = high_files[index];
                     int fd = ::open(info.filename.c_str(), O_RDONLY);
                     if (fd < 0)
                     {
@@ -1066,7 +1289,7 @@ namespace
                     while (remaining > 0)
                     {
                         uint64_t batch = std::min<uint64_t>(remaining, 65536);
-                        uint64_t bytes = read_compact_root_records<N>(
+                        uint64_t bytes = read_compact_high_records<N>(
                             fd, offset, batch, buffer.data(), opts.k_len);
                         for (uint64_t i = 0; i < batch; ++i)
                             if (in_range(buffer[i].count, opts.min_freq, opts.max_freq))
@@ -1088,11 +1311,11 @@ namespace
 
             // sort and write with parallel radix sort
             uint64_t total = 0;
-            for (auto &v : thread_results)
+            for (auto &v : high_results)
                 total += v.size();
             std::vector<ExportRecord<N>> results;
             results.reserve(total);
-            for (auto &v : thread_results)
+            for (auto &v : high_results)
             {
                 results.insert(results.end(), v.begin(), v.end());
                 v.clear();
@@ -1113,9 +1336,9 @@ namespace
                 for (;;)
                 {
                     uint64_t index = next_file.fetch_add(1, std::memory_order_relaxed);
-                    if (index >= root_files.size())
+                    if (index >= high_files.size())
                         break;
-                    const RootFileInfo &info = root_files[index];
+                    const RootFileInfo &info = high_files[index];
                     int fd = ::open(info.filename.c_str(), O_RDONLY);
                     if (fd < 0)
                     {
@@ -1127,7 +1350,7 @@ namespace
                     while (remaining > 0)
                     {
                         uint64_t batch = std::min<uint64_t>(remaining, 65536);
-                        uint64_t bytes = read_compact_root_records<N>(
+                        uint64_t bytes = read_compact_high_records<N>(
                             fd, offset, batch, buffer.data(), opts.k_len);
                         for (uint64_t i = 0; i < batch; ++i)
                             if (in_range(buffer[i].count, opts.min_freq, opts.max_freq))
