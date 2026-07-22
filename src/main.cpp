@@ -453,15 +453,13 @@ int process_main()
 int main(int argc, char* argv[])
 {
 
-    if (argc < 6 || argc > 9)
+    if (argc < 6 || argc > 10)
     {
         std::cerr << "Usage: " << argv[0]
-            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [min_count] [max_count]" << std::endl;
+            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [filter_min=2] [filter_max=4294967295] [count_max=255]" << std::endl;
         return 1;
     }
 
-    min_count = 1;
-    max_count = std::numeric_limits<uint32_t>::max();
 
 #ifdef ZLIBNG_VERSION
     std::cout << "Using zlib-ng version " << ZLIBNG_VERSION << std::endl;
@@ -516,11 +514,15 @@ int main(int argc, char* argv[])
         }
         if (argc >= 8)
         {
-            min_count = std::stoul(argv[7]);
+            filter_min = std::stoul(argv[7]);
         }
         if (argc >= 9)
         {
-            max_count = std::stoul(argv[8]);
+            filter_max = std::stoul(argv[8]);
+        }
+        if (argc >= 10)
+        {
+            count_max = std::stoul(argv[9]);
         }
 
         if (n_thread < 6)
@@ -537,25 +539,52 @@ int main(int argc, char* argv[])
         std::cout << "  Thread count: " << n_thread << std::endl;
         std::cout << "  Memory limit (GB): " << memory_limit << std::endl;
         std::cout << "  Map capacity: " << kmer_concurrent_hash_map_capacity << std::endl;
-        std::cout << "  Min count: " << min_count << std::endl;
-        std::cout << "  Max count: " << max_count << std::endl;
+        std::cout << "  Filter min: " << filter_min << std::endl;
+        std::cout << "  Filter max: " << filter_max << std::endl;
+        std::cout << "  Count max: " << count_max << std::endl;
     }
     catch (const std::exception&)
     {
         std::cerr << "Usage: " << argv[0]
-            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [min_count] [max_count]" << std::endl;
+            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [filter_min] [filter_max] [count_max]" << std::endl;
         return 1;
     }
 
-    if (kmer_concurrent_hash_map_capacity <= 1 || kmer_concurrent_hash_map_capacity >= 16ULL * 1024 * 1024 || max_count < min_count)
+    if (kmer_concurrent_hash_map_capacity <= 1 || kmer_concurrent_hash_map_capacity >= 16ULL * 1024 * 1024 || filter_max < filter_min || count_max == 0)
     {
         std::cerr << "Usage: " << argv[0]
-            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [min_count] [max_count]" << std::endl;
+            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [filter_min] [filter_max] [count_max]" << std::endl;
         return 1;
     }
 
     MAX_BLOOM_FILTER_CAPACITY = std::bit_ceil(std::max<uint64_t>(MIN_BLOOM_FILTER_CAPACITY, memory_limit * 1024ULL * 1024ULL * 1024ULL / (4 * 8) / (1ULL << (2 * ROOT_BASES))));
 
+    int fd = ::open((temp_dir + "infos.bin").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd == -1) {
+        std::cerr << "Open infos.bin failed : " << strerror(errno) << std::endl;
+        return 1;
+    }
+    ::write(fd, &k_len, sizeof(k_len));
+    ::write(fd, &count_max, sizeof(count_max));
+    ::close(fd);
+    
+    if (count_max <= 0xFF)
+    {
+        count_max_bytes = 1;
+    }
+    else if (count_max <= 0xFFFF)
+    {
+        count_max_bytes = 2;
+
+    }
+    else if (count_max <= 0xFFFFFF)
+    {
+        count_max_bytes = 3;
+    }
+    else
+    {
+        count_max_bytes = 4;
+    }
 
     if (k_len <= 32)
     {
@@ -572,6 +601,6 @@ int main(int argc, char* argv[])
     else
     {
         std::cerr << "k_len must be <= 128" << std::endl;
-        return 1; 
+        return 1;
     }
 }

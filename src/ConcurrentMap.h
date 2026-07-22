@@ -163,12 +163,18 @@ public:
 
         if (remaining == 0 || block_ptr == nullptr) return;
 
-        for (int i = 0;i < SLOT_BLOCK_POINTER_NUM;i++)
+        // for (int i = 0;i < SLOT_BLOCK_POINTER_NUM;i++)
+        // {
+        //     if (block_ptr->last_blocks[i] == nullptr) break;
+        //     __builtin_prefetch(block_ptr->last_blocks[i], 0, 0);
+        // }
+        for (int i = 0;i < 2;i++)
         {
-            if (block_ptr == nullptr) break;
-            __builtin_prefetch(block_ptr->last_blocks[i], 0, 0);
+            if (block_ptr->last_blocks[i] == nullptr) break;
+            __builtin_prefetch(block_ptr->last_blocks[i], 0, 2);
         }
-        uint64_t first_block_count;
+
+        uint64_t first_block_count = 0;
 
         if (block_count > 1)
         {
@@ -194,16 +200,27 @@ public:
         }
 
         block_ptr = block_ptr->last_blocks[0];
-        if (block_ptr->last_blocks[SLOT_BLOCK_POINTER_NUM - 1] != nullptr)
+        // if (block_ptr->last_blocks[SLOT_BLOCK_POINTER_NUM - 1] != nullptr)
+        // {
+        //     __builtin_prefetch(block_ptr->last_blocks[SLOT_BLOCK_POINTER_NUM - 1], 0, 0);
+        // }
+        if (block_ptr->last_blocks[1] != nullptr)
         {
-            __builtin_prefetch(block_ptr->last_blocks[SLOT_BLOCK_POINTER_NUM - 1], 0, 0);
+            __builtin_prefetch(block_ptr->last_blocks[1], 0, 2);
         }
+
 
         while (remaining > 0)
         {
-            if (block_ptr->last_blocks[SLOT_BLOCK_POINTER_NUM - 1] != nullptr) [[likely]]
+            // if (block_ptr->last_blocks[SLOT_BLOCK_POINTER_NUM - 1] != nullptr) [[likely]]
+            // {
+            //     __builtin_prefetch(block_ptr->last_blocks[SLOT_BLOCK_POINTER_NUM - 1], 0, 0);
+            // }
+            if (block_ptr->last_blocks[1] != nullptr) [[likely]]
             {
-                __builtin_prefetch(block_ptr->last_blocks[SLOT_BLOCK_POINTER_NUM - 1], 0, 0);
+                {
+                    __builtin_prefetch(block_ptr->last_blocks[1], 0, 2);
+                }
             }
 
             writer.write_map_record(block_ptr->slots.data(), SLOTS_PER_BLOCK);
@@ -227,7 +244,17 @@ public:
         {
             if (k_mer == cur_node->k_mer)
             {
-                cur_node->count.fetch_add(count, std::memory_order_relaxed);
+                {
+                    uint32_t cur = cur_node->count.load(std::memory_order_relaxed);
+                    if (cur < count_max)
+                    {
+                        uint32_t prev = cur_node->count.fetch_add(count, std::memory_order_relaxed);
+                        if (prev + count < prev || prev + count > count_max) [[unlikely]]
+                        {
+                            cur_node->count.store(count_max, std::memory_order_relaxed);
+                        }
+                    }
+                }
                 return;
             }
         }
@@ -238,7 +265,7 @@ public:
         new_chain_first_node = allocate_node();
 
         new_chain_first_node->k_mer = k_mer;
-        new_chain_first_node->count.store(count, std::memory_order_relaxed);
+        new_chain_first_node->count.store(std::min<uint32_t>(count_max, count), std::memory_order_relaxed);
 
         while (true)
         {
@@ -254,7 +281,17 @@ public:
             {
                 if (k_mer == cur_node->k_mer)
                 {
-                    cur_node->count.fetch_add(count, std::memory_order_relaxed);
+                    {
+                        uint32_t cur = cur_node->count.load(std::memory_order_relaxed);
+                        if (cur < count_max)
+                        {
+                            uint32_t prev = cur_node->count.fetch_add(count, std::memory_order_relaxed);
+                            if (prev + count < prev || prev + count > count_max) [[unlikely]]
+                            {
+                                cur_node->count.store(count_max, std::memory_order_relaxed);
+                            }
+                        }
+                    }
                     release_node(new_chain_first_node);
                     return;
                 }
@@ -278,7 +315,17 @@ public:
         {
             if (k_mer == cur_node->k_mer)
             {
-                cur_node->count.fetch_add(count, std::memory_order_relaxed);
+                {
+                    uint32_t cur = cur_node->count.load(std::memory_order_relaxed);
+                    if (cur < count_max)
+                    {
+                        uint32_t prev = cur_node->count.fetch_add(count, std::memory_order_relaxed);
+                        if (prev + count < prev || prev + count > count_max) [[unlikely]]
+                        {
+                            cur_node->count.store(count_max, std::memory_order_relaxed);
+                        }
+                    }
+                }
                 return;
             }
         }
@@ -289,7 +336,7 @@ public:
         new_chain_first_node = allocate_node();
 
         new_chain_first_node->k_mer = k_mer;
-        new_chain_first_node->count.store(count, std::memory_order_relaxed);
+        new_chain_first_node->count.store(std::min<uint32_t>(count_max, count), std::memory_order_relaxed);
 
         while (true)
         {
@@ -304,7 +351,17 @@ public:
             {
                 if (k_mer == cur_node->k_mer)
                 {
-                    cur_node->count.fetch_add(count, std::memory_order_relaxed);
+                    {
+                        uint32_t cur = cur_node->count.load(std::memory_order_relaxed);
+                        if (cur < count_max)
+                        {
+                            uint32_t prev = cur_node->count.fetch_add(count, std::memory_order_relaxed);
+                            if (prev + count < prev || prev + count > count_max) [[unlikely]]
+                            {
+                                cur_node->count.store(count_max, std::memory_order_relaxed);
+                            }
+                        }
+                    }
                     release_node(new_chain_first_node);
                     return;
                 }

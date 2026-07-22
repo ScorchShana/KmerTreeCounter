@@ -1303,7 +1303,7 @@ private:
 
     void append_export_record(FinalDrainWriter<N>& writer, const kmer<N>& key, const uint32_t count)
     {
-        if (count < min_count || count > max_count)
+        if (count + 1 < filter_min || count > filter_max)
         {
             return;
         }
@@ -1366,6 +1366,7 @@ private:
             }
             else
             {
+                prev_count = std::min(prev_count, static_cast<uint32_t>(count_max));
                 append_export_record(writer, prev_key, prev_count);
                 prev_key = current_key;
                 prev_count = 1;
@@ -1381,6 +1382,7 @@ private:
 
         if (has_prev) [[likely]]
         {
+            prev_count = std::min(prev_count, static_cast<uint32_t>(count_max));
             append_export_record(writer, prev_key, prev_count);
         }
 
@@ -1406,7 +1408,7 @@ private:
                     __builtin_prefetch(node_ptr->next, 0, 0);
                 }
                 append_export_record(writer, node_ptr->k_mer,
-                    static_cast<uint32_t>(node_ptr->count.load(std::memory_order_relaxed)));
+                    std::min(count_max,node_ptr->count.load(std::memory_order_relaxed)));
 
                 node_ptr = node_ptr->next;
             }

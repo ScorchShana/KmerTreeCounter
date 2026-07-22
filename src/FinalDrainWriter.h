@@ -3,6 +3,7 @@
 
 #include "definition.h"
 #include "RingMemoryPool.h"
+#include "SpinBackoff.h"
 
 #include <cstring>
 #include <algorithm>
@@ -24,6 +25,9 @@ private:
     char* current_block_;
     uint64_t current_offset_;
 
+    SpinBackoff<> dequeue_backoff;
+    SpinBackoff<> enqueue_backoff;
+
 public:
     FinalDrainWriter(const FinalDrainWriter&) = delete;
     FinalDrainWriter& operator=(const FinalDrainWriter&) = delete;
@@ -35,7 +39,7 @@ public:
         local_sorted_kmer_count(0),
         k(in_k), tail_bits(2 * (k % BASES_PER_U64T)), tail_bytes((tail_bits + 7) / 8), full_words(k / BASES_PER_U64T),
         kmer_bytes(full_words * sizeof(uint64_t) + tail_bytes),
-        total_bytes(static_cast<uint32_t>(kmer_bytes + sizeof(uint32_t))),
+        total_bytes(static_cast<uint32_t>(kmer_bytes + count_max_bytes)),
         mask((~uint64_t{ 0 }) << (64 - tail_bits)),
         pool_(pool), current_block_(nullptr), current_offset_(0)
     {
@@ -46,7 +50,7 @@ public:
     {
         if (current_block_ != nullptr)
         {
-            pool_->producer_enqueue({current_block_, current_offset_});
+            pool_->producer_enqueue({ current_block_, current_offset_ });
             current_block_ = nullptr;
         }
         sorted_kmer_count.fetch_add(local_sorted_kmer_count, std::memory_order_relaxed);
@@ -73,8 +77,8 @@ public:
             reinterpret_cast<const char*>(&tail_data) + (8 - tail_bytes), tail_bytes);
         current_offset_ += tail_bytes;
 
-        std::memcpy(current_block_ + current_offset_, &count, sizeof(uint32_t));
-        current_offset_ += sizeof(uint32_t);
+        std::memcpy(current_block_ + current_offset_, &count, count_max_bytes);
+        current_offset_ += count_max_bytes;
     }
 
     void write_map_record(const concurrent_node<N>* nodes, const uint32_t count)
@@ -86,6 +90,13 @@ public:
         for (uint32_t i = 0; i < first_to_write; i++)
         {
             const auto& node = nodes[i];
+            const uint32_t rec_count = node.count.load(std::memory_order_relaxed);
+
+            if (rec_count + 1 < filter_min || rec_count > filter_max) [[unlikely]]
+            {
+                continue;
+            }
+            
             std::memcpy(current_block_ + current_offset_, node.k_mer.data.data(),
                 full_words * sizeof(uint64_t));
             current_offset_ += full_words * sizeof(uint64_t);
@@ -95,9 +106,8 @@ public:
                 reinterpret_cast<const char*>(&tail_data) + (8 - tail_bytes), tail_bytes);
             current_offset_ += tail_bytes;
 
-            const uint32_t rec_count = node.count.load(std::memory_order_relaxed);
-            std::memcpy(current_block_ + current_offset_, &rec_count, sizeof(uint32_t));
-            current_offset_ += sizeof(uint32_t);
+            std::memcpy(current_block_ + current_offset_, &rec_count, count_max_bytes);
+            current_offset_ += count_max_bytes;
         }
 
         if (first_to_write < count) [[unlikely]]
@@ -107,6 +117,13 @@ public:
             for (uint32_t i = first_to_write; i < count; i++)
             {
                 const auto& node = nodes[i];
+                const uint32_t rec_count = node.count.load(std::memory_order_relaxed);
+
+                if (rec_count + 1 < filter_min || rec_count > filter_max) [[unlikely]]
+                {
+                    continue;
+                }
+
                 std::memcpy(current_block_ + current_offset_, node.k_mer.data.data(),
                     full_words * sizeof(uint64_t));
                 current_offset_ += full_words * sizeof(uint64_t);
@@ -116,9 +133,8 @@ public:
                     reinterpret_cast<const char*>(&tail_data) + (8 - tail_bytes), tail_bytes);
                 current_offset_ += tail_bytes;
 
-                const uint32_t rec_count = node.count.load(std::memory_order_relaxed);
-                std::memcpy(current_block_ + current_offset_, &rec_count, sizeof(uint32_t));
-                current_offset_ += sizeof(uint32_t);
+                std::memcpy(current_block_ + current_offset_, &rec_count, count_max_bytes);
+                current_offset_ += count_max_bytes;
             }
         }
     }
@@ -126,8 +142,32 @@ public:
 private:
     void flush_block()
     {
-        pool_->producer_enqueue({current_block_, current_offset_});
-        pool_->producer_dequeue(current_block_);
+        if (pool_->producer_try_enqueue({ current_block_, current_offset_ }))
+        {
+            enqueue_backoff.double_decay();
+        }
+        else
+        {
+            while (!pool_->producer_try_enqueue({ current_block_, current_offset_ }))
+            {
+                enqueue_backoff.backoff();
+            }
+            enqueue_backoff.decay();
+        }
+        
+        if (pool_->producer_try_dequeue(current_block_))
+        {
+            dequeue_backoff.double_decay();
+        }
+        else
+        {
+            while(!pool_->producer_try_dequeue(current_block_))
+            {
+                dequeue_backoff.backoff();
+            }
+            dequeue_backoff.decay();
+        }
+        
         current_offset_ = 0;
     }
 };

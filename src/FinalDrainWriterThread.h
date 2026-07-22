@@ -8,7 +8,8 @@
 #include <aio.h>
 #include <fcntl.h>
 #include <unistd.h>
-
+#include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <array>
 #include <cstring>
@@ -17,21 +18,24 @@
 class FinalDrainWriterThread
 {
     static constexpr uint64_t AIO_BUFFER_SIZE = 512 * 1024;
+    static constexpr uint32_t NUM_AIO_BUFFERS = 4;
+    // static constexpr uint64_t AIO_BUFFER_SIZE = 1ULL * 1024 * 1024;
 
     RingMemoryPool<FINAL_DRAIN_RING_POOL_CAPACITY> pool_;
     int fd_;
     std::thread thread_;
 
-    struct aiocb cbs_[2];
-    bool cbs_active_[2];
-    std::array<char*, 2> buffer_;
-    std::array<uint64_t, 2> buffer_count_;
+    struct aiocb cbs_[NUM_AIO_BUFFERS];
+    bool cbs_active_[NUM_AIO_BUFFERS];
+    std::array<char*, NUM_AIO_BUFFERS> buffer_;
+    std::array<uint64_t, NUM_AIO_BUFFERS> buffer_count_;
     uint32_t current_buffer_index_ = 0;
     uint64_t file_offset_ = 0;
 
 public:
     FinalDrainWriterThread(uint32_t block_size, uint32_t producer_count)
-        : pool_(block_size, producer_count), fd_(-1) {}
+        : pool_(block_size, producer_count), fd_(-1) {
+    }
 
     auto* pool() { return &pool_; }
 
@@ -43,9 +47,12 @@ public:
             std::cerr << "Failed to open high.bin\n";
             std::exit(-1);
         }
-        cbs_active_[0] = cbs_active_[1] = false;
-        buffer_[0] = buffer_[1] = nullptr;
-        buffer_count_[0] = buffer_count_[1] = 0;
+        for (uint32_t i = 0; i < NUM_AIO_BUFFERS; ++i)
+        {
+            cbs_active_[i] = false;
+            buffer_[i] = nullptr;
+            buffer_count_[i] = 0;
+        }
         thread_ = std::thread(&FinalDrainWriterThread::writer_loop, this);
     }
 
@@ -57,11 +64,11 @@ public:
             ::close(fd_);
             fd_ = -1;
         }
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < NUM_AIO_BUFFERS; i++)
         {
             if (buffer_[i] != nullptr)
             {
-                delete[] buffer_[i];
+                ::free(buffer_[i]);
                 buffer_[i] = nullptr;
             }
         }
@@ -78,8 +85,16 @@ public:
 private:
     void writer_loop()
     {
-        buffer_[0] = new char[AIO_BUFFER_SIZE]();
-        buffer_[1] = new char[AIO_BUFFER_SIZE]();
+        for (int i = 0; i < NUM_AIO_BUFFERS; i++)
+        {
+            void* buffer_ptr = nullptr;
+            int ret = ::posix_memalign(&buffer_ptr, 4096, AIO_BUFFER_SIZE);
+            if (ret != 0) {
+                std::cerr << "posix_memalign failed for buffer: " << strerror(ret) << std::endl;
+                std::exit(-1);
+            }
+            buffer_[i] = static_cast<char*>(buffer_ptr);
+        }
 
         SpinBackoff<128, 128, 256 * 1024> backoff;
         content_type content;
@@ -106,15 +121,24 @@ private:
             }
         }
 
-        wait_write_finish(1 - current_buffer_index_);
+        for (uint32_t i = 0; i < NUM_AIO_BUFFERS; ++i)
+        {
+            if (cbs_active_[i])
+            {
+                wait_write_finish(i);
+            }
+        }
         if (buffer_count_[current_buffer_index_] > 0)
         {
             async_write(current_buffer_index_);
             wait_write_finish(current_buffer_index_);
         }
 
-        delete[] buffer_[0]; buffer_[0] = nullptr;
-        delete[] buffer_[1]; buffer_[1] = nullptr;
+        for (uint32_t i = 0; i < NUM_AIO_BUFFERS; ++i)
+        {
+            if (buffer_[i]) ::free(buffer_[i]);
+            buffer_[i] = nullptr;
+        }
     }
 
     void process_block(const content_type& content)
@@ -134,8 +158,8 @@ private:
             buffer_count_[current_buffer_index_] += to_copy;
 
             async_write(current_buffer_index_);
-            current_buffer_index_ = 1 - current_buffer_index_;
-            wait_write_finish(current_buffer_index_);
+            current_buffer_index_ = (current_buffer_index_ + 1) % NUM_AIO_BUFFERS;
+            wait_write_finish(current_buffer_index_); 
 
             std::memcpy(buffer_[current_buffer_index_], content.data + to_copy, remaining);
             buffer_count_[current_buffer_index_] = remaining;
