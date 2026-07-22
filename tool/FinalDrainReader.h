@@ -25,7 +25,8 @@ class FinalDrainReader
     int fd = -1;
     uint32_t k_length;
     uint64_t kmer_bytes;           // compact k-mer bytes in file
-    uint64_t compact_record_size;  // kmer_bytes + sizeof(uint32_t)
+    uint32_t count_bytes_;        // count width (1-4 bytes)
+    uint64_t compact_record_size; // kmer_bytes + count_bytes_
     uint64_t full_words;
     uint64_t tail_bits;
     uint64_t tail_bytes;
@@ -41,14 +42,14 @@ class FinalDrainReader
     std::array<uint64_t, 2> buffer_cursor{};
 
 public:
-    explicit FinalDrainReader(uint32_t k)
-        : k_length(k)
+    explicit FinalDrainReader(uint32_t k, uint32_t count_bytes = sizeof(uint32_t))
+        : k_length(k), count_bytes_(count_bytes)
     {
         full_words = k_length / BASES_PER_U64T;
         tail_bits = 2 * (k_length % BASES_PER_U64T);
         tail_bytes = (tail_bits + 7) / 8;
         kmer_bytes = full_words * sizeof(uint64_t) + tail_bytes;
-        compact_record_size = kmer_bytes + sizeof(uint32_t);
+        compact_record_size = kmer_bytes + count_bytes_;
 
         for (uint32_t i = 0; i < 2; ++i)
         {
@@ -212,8 +213,9 @@ public:
                     dst.key.data[full_words] = tail_data;
                 }
 
-                // Copy 32-bit count
-                std::memcpy(&dst.count, src + kmer_bytes, sizeof(uint32_t));
+                // Copy count (count_bytes_ bytes, expanded to uint32_t)
+                dst.count = 0;
+                std::memcpy(&dst.count, src + kmer_bytes, count_bytes_);
             }
 
             buffer_cursor[idx] += to_copy;

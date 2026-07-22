@@ -30,12 +30,21 @@ namespace
     constexpr uint64_t BYTES_PER_GIB = 1024ULL * 1024ULL * 1024ULL;
     constexpr char BASE_CHARS[] = {'A', 'C', 'G', 'T'};
 
+    struct Infos
+    {
+        uint32_t k_len = 0;
+        uint32_t count_max = 0;
+        uint32_t count_bytes = 4;
+    };
+
     struct Options
     {
         std::string tmp_dir;
         bool is_precise = false;
         bool sort_output = false;
         uint32_t k_len = 0;
+        uint32_t count_max = 0;
+        uint32_t count_bytes = 4;
         uint32_t max_threads = 0;
         uint64_t max_memory_bytes = 0;
         std::string output_file;
@@ -483,19 +492,18 @@ namespace
     }
     static Options parse_options(int argc, char *argv[])
     {
-        if (argc < 7 || argc > 10)
+        if (argc < 6 || argc > 9)
         {
-            std::cerr << "Usage: dump_tool <precise/approximate> <tmp_dir> <k_len>"
+            std::cerr << "Usage: dump_tool <precise/approximate> <tmp_dir>"
                       << " <max_threads> <max_memory_gb> <output_file>"
                       << " [min_freq] [max_freq] [--sort]\n";
             exit(-1);
         }
         Options opts;
         opts.tmp_dir = with_trailing_slash(argv[2]);
-        opts.k_len = parse_u32(argv[3], "k_len");
-        opts.max_threads = parse_u32(argv[4], "max_threads");
-        opts.max_memory_bytes = parse_memory_gib(argv[5]);
-        opts.output_file = argv[6];
+        opts.max_threads = parse_u32(argv[3], "max_threads");
+        opts.max_memory_bytes = parse_memory_gib(argv[4]);
+        opts.output_file = argv[5];
         if (std::strcmp(argv[1], "precise") == 0)
             opts.is_precise = true;
         else if (std::strcmp(argv[1], "approximate") == 0)
@@ -506,7 +514,7 @@ namespace
             exit(-1);
         }
 
-        int next_arg = 7;
+        int next_arg = 6;
         if (argc > next_arg && argv[next_arg][0] != '-')
             opts.min_freq = parse_u32(argv[next_arg++], "min_freq");
         if (argc > next_arg && argv[next_arg][0] != '-')
@@ -514,11 +522,7 @@ namespace
         if (argc > next_arg && std::strcmp(argv[next_arg], "--sort") == 0)
             opts.sort_output = true;
 
-        if (opts.k_len == 0 || opts.k_len > MAX_K)
-        {
-            std::cerr << "invalid k_len\n";
-            exit(-1);
-        }
+        // k_len is read from infos.bin later
         if (opts.max_threads == 0)
         {
             std::cerr << "invalid max_threads\n";
@@ -530,6 +534,43 @@ namespace
             exit(-1);
         }
         return opts;
+    }
+
+    static Infos read_infos(const std::string& tmp_dir)
+    {
+        Infos info;
+        const std::string path = tmp_dir + "infos.bin";
+        const int fd = ::open(path.c_str(), O_RDONLY);
+        if (fd < 0)
+        {
+            std::cerr << "failed to open " << path << ": " << std::strerror(errno) << '\n';
+            exit(-1);
+        }
+        uint32_t buf[2];
+        if (::read(fd, buf, sizeof(buf)) != static_cast<ssize_t>(sizeof(buf)))
+        {
+            std::cerr << "failed to read " << path << '\n';
+            ::close(fd);
+            exit(-1);
+        }
+        ::close(fd);
+        info.k_len = buf[0];
+        info.count_max = buf[1];
+        if (info.count_max <= 0xFF)
+            info.count_bytes = 1;
+        else if (info.count_max <= 0xFFFF)
+            info.count_bytes = 2;
+        else if (info.count_max <= 0xFFFFFF)
+            info.count_bytes = 3;
+        else
+            info.count_bytes = 4;
+        if (info.k_len == 0 || info.k_len > MAX_K)
+        {
+            std::cerr << "invalid k_len from infos.bin: " << info.k_len << '\n';
+            exit(-1);
+        }
+
+        return info;
     }
 
     static std::string high_filename(const std::string &dir)
@@ -556,13 +597,13 @@ namespace
     template <uint32_t N>
     static uint64_t read_compact_high_records(
         int fd, uint64_t file_offset, uint64_t count,
-        ExportRecord<N>* out, uint32_t k_len)
+        ExportRecord<N>* out, uint32_t k_len, uint32_t count_bytes)
     {
         const uint64_t full_words = k_len / BASES_PER_U64T;
         const uint64_t tail_bits = 2ULL * (k_len % BASES_PER_U64T);
         const uint64_t tail_bytes = (tail_bits + 7) / 8;
         const uint64_t kmer_bytes = full_words * sizeof(uint64_t) + tail_bytes;
-        const uint64_t compact_rec = kmer_bytes + sizeof(uint32_t);
+        const uint64_t compact_rec = kmer_bytes + count_bytes;
 
         const size_t total_bytes = static_cast<size_t>(count * compact_rec);
         std::vector<char> buf(total_bytes);
@@ -587,7 +628,8 @@ namespace
                             src + full_words * sizeof(uint64_t), tail_bytes);
                 dst.key.data[full_words] = tail;
             }
-            std::memcpy(&dst.count, src + kmer_bytes, sizeof(uint32_t));
+            dst.count = 0;
+            std::memcpy(&dst.count, src + kmer_bytes, count_bytes);
         }
         return total_bytes;
     }
@@ -596,9 +638,10 @@ namespace
     template <uint32_t N>
     static std::vector<RootFileInfo> collect_high_files(const std::string &tmp_dir,
                                                           uint64_t &total_records,
-                                                          uint32_t k_len)
+                                                          uint32_t k_len,
+                                                          uint32_t count_bytes)
     {
-        const uint64_t compact_rec = packed_kmer_bytes<N>(k_len) + sizeof(uint32_t);
+        const uint64_t compact_rec = packed_kmer_bytes<N>(k_len) + count_bytes;
         std::vector<RootFileInfo> files;
 
         std::string path = high_filename(tmp_dir);
@@ -642,6 +685,7 @@ namespace
                                uint32_t min_freq,
                                uint32_t max_freq,
                                uint32_t k_len,
+                               uint32_t count_bytes,
                                ProgressPrinter *progress)
     {
         std::atomic<uint64_t> next_file{0};
@@ -668,7 +712,7 @@ namespace
                 {
                     uint64_t batch = std::min<uint64_t>(remaining, 65536);
                     uint64_t bytes = read_compact_high_records<N>(fd, offset, batch,
-                                                                  buffer.data(), k_len);
+                                                                  buffer.data(), k_len, count_bytes);
                     for (uint64_t i = 0; i < batch; ++i)
                         if (in_range(buffer[i].count, min_freq, max_freq))
                             hash_map.insert_unique(buffer[i].key, buffer[i].count);
@@ -697,6 +741,7 @@ namespace
                                  uint32_t max_freq,
                                  uint32_t worker_count,
                                  uint64_t packed_bytes,
+                                 uint32_t count_max,
                                  ProgressPrinter *progress,
                                  AsyncWriter *writer)
     {
@@ -759,6 +804,7 @@ namespace
                 uint64_t slot  = UINT64_MAX;
                 if (hash_map.find_prepared_slot(key, lookup, count, slot)) {
                     uint64_t merged = static_cast<uint64_t>(count) + 1;
+                    if (merged > count_max) merged = count_max;
                     if (in_range(merged, min_freq, max_freq))
                         line_writer.write_line(key, static_cast<uint32_t>(merged));
                     *hash_map.mutable_count_at(slot) = 0;
@@ -783,6 +829,7 @@ namespace
                                          uint32_t max_freq,
                                          uint32_t worker_count,
                                          uint64_t packed_bytes,
+                                         uint32_t count_max,
                                          ProgressPrinter *progress)
     {
         int fd = ::open(low_path.c_str(), O_RDONLY);
@@ -836,6 +883,7 @@ namespace
                 uint64_t slot  = UINT64_MAX;
                 if (hash_map.find_prepared_slot(key, lookup, count, slot)) {
                     uint64_t merged = static_cast<uint64_t>(count) + 1;
+                    if (merged > count_max) merged = count_max;
                     if (in_range(merged, min_freq, max_freq))
                         local.push_back({key, static_cast<uint32_t>(merged)});
                     *hash_map.mutable_count_at(slot) = 0;
@@ -997,7 +1045,7 @@ namespace
     {
         // Count total high records
         uint64_t total_high_records = 0;
-        (void)collect_high_files<N>(opts.tmp_dir, total_high_records, opts.k_len);
+        (void)collect_high_files<N>(opts.tmp_dir, total_high_records, opts.k_len, opts.count_bytes);
 
         const uint32_t P = compute_partition_bits<N>(total_high_records, opts.max_memory_bytes);
         if (P == 0)
@@ -1159,7 +1207,7 @@ namespace
 
         // Collect high file metadata
         uint64_t total_high_records = 0;
-        auto high_files = collect_high_files<N>(opts.tmp_dir, total_high_records, opts.k_len);
+        auto high_files = collect_high_files<N>(opts.tmp_dir, total_high_records, opts.k_len, opts.count_bytes);
         uint64_t high_bytes = 0;
         for (auto &rf : high_files)
             high_bytes += rf.file_size;
@@ -1191,7 +1239,7 @@ namespace
         // build hash map
         FlatConcurrentHashMap<N> hash_map(total_high_records, wc);
         build_hash_map<N>(high_files, hash_map, wc,
-                          opts.min_freq, opts.max_freq, opts.k_len, &progress);
+                          opts.min_freq, opts.max_freq, opts.k_len, opts.count_bytes, &progress);
         hash_map.seal();
 
         if (opts.sort_output)
@@ -1200,7 +1248,7 @@ namespace
             std::vector<ExportRecord<N>> results;
             process_low_freq_collect<N>(opts.tmp_dir + "low.bin", hash_map, results,
                                         opts.k_len, opts.min_freq, opts.max_freq,
-                                        wc, pkb, &progress);
+                                        wc, pkb, opts.count_max, &progress);
             collect_remaining_into_vector<N>(hash_map, results,
                                              opts.min_freq, opts.max_freq);
             progress.finish();
@@ -1212,7 +1260,7 @@ namespace
             writer.open(opts.output_file);
             process_low_freq<N>(opts.tmp_dir + "low.bin", hash_map,
                                 opts.k_len, opts.min_freq, opts.max_freq,
-                                wc, pkb, &progress, &writer);
+                                wc, pkb, opts.count_max, &progress, &writer);
             collect_remaining_stream<N>(hash_map, opts.min_freq, opts.max_freq,
                                         &writer, opts.k_len);
             writer.finish();
@@ -1228,7 +1276,7 @@ namespace
         temp_dir = opts.tmp_dir;
 
         uint64_t total_high_records = 0;
-        (void)collect_high_files<N>(opts.tmp_dir, total_high_records, opts.k_len);
+        (void)collect_high_files<N>(opts.tmp_dir, total_high_records, opts.k_len, opts.count_bytes);
 
         // Memory check
         uint64_t estimated_mem = FlatConcurrentHashMap<N>::required_mmap_bytes(total_high_records);
@@ -1251,7 +1299,7 @@ namespace
         uint32_t wc = std::max<uint32_t>(1, opts.max_threads);
 
         uint64_t total_records = 0;
-        auto high_files = collect_high_files<N>(opts.tmp_dir, total_records, opts.k_len);
+        auto high_files = collect_high_files<N>(opts.tmp_dir, total_records, opts.k_len, opts.count_bytes);
         uint64_t total_bytes = 0;
         for (auto &rf : high_files)
             total_bytes += rf.file_size;
@@ -1290,7 +1338,7 @@ namespace
                     {
                         uint64_t batch = std::min<uint64_t>(remaining, 65536);
                         uint64_t bytes = read_compact_high_records<N>(
-                            fd, offset, batch, buffer.data(), opts.k_len);
+                            fd, offset, batch, buffer.data(), opts.k_len, opts.count_bytes);
                         for (uint64_t i = 0; i < batch; ++i)
                             if (in_range(buffer[i].count, opts.min_freq, opts.max_freq))
                                 local.push_back(buffer[i]);
@@ -1351,7 +1399,7 @@ namespace
                     {
                         uint64_t batch = std::min<uint64_t>(remaining, 65536);
                         uint64_t bytes = read_compact_high_records<N>(
-                            fd, offset, batch, buffer.data(), opts.k_len);
+                            fd, offset, batch, buffer.data(), opts.k_len, opts.count_bytes);
                         for (uint64_t i = 0; i < batch; ++i)
                             if (in_range(buffer[i].count, opts.min_freq, opts.max_freq))
                                 line_writer.write_line(buffer[i].key, buffer[i].count);
@@ -1398,14 +1446,10 @@ namespace
 
 int main(int argc, char *argv[])
 {
-
-    auto start = std::chrono::high_resolution_clock::now();
-
     Options opts = parse_options(argc, argv);
-    int x = opts.is_precise ? dispatch_precise(opts) : dispatch_approximate(opts);
-
-    auto end = std::chrono::high_resolution_clock::now(); // 结束时间点
-    auto duration = duration_cast<std::chrono::microseconds>(end - start);
-
-    std::cout << "耗时: " << duration.count() << " 微秒" << std::endl;
+    const Infos info = read_infos(opts.tmp_dir);
+    opts.k_len = info.k_len;
+    opts.count_max = info.count_max;
+    opts.count_bytes = info.count_bytes;
+    return opts.is_precise ? dispatch_precise(opts) : dispatch_approximate(opts);
 }

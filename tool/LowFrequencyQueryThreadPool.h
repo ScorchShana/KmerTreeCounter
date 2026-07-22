@@ -33,7 +33,8 @@ public:
         const uint32_t k_len,
         const uint32_t min_freq,
         const uint32_t max_freq,
-        const size_t hist_size)
+        const size_t hist_size,
+        const uint32_t count_max = std::numeric_limits<uint32_t>::max())
         : pool_(pool),
         hash_map_(hash_map),
         global_histogram_(global_histogram),
@@ -42,6 +43,7 @@ public:
         min_freq_(min_freq),
         max_freq_(max_freq),
         hist_size_(hist_size),
+        count_max_(count_max),
         full_data_count_(k_len / BASES_PER_U64T),
         tail_bits_(2ULL * (k_len % BASES_PER_U64T)),
         tail_bytes_((tail_bits_ + 7ULL) / 8ULL),
@@ -206,7 +208,6 @@ private:
             const uint64_t lookup_slot = i % QUERY_PREFETCH_DISTANCE;
             const Lookup lookup = lookups[static_cast<size_t>(lookup_slot)];
             const kmer<N>& key = unpacked_kmers[static_cast<size_t>(lookup_slot)];
-            // normalize_kmer(key, k_len_);
 
             uint32_t count = 0;
             if (hash_map_->find_prepared(key, lookup, count)) [[unlikely]]
@@ -216,7 +217,10 @@ private:
                     local_histogram[histogram_index(count, min_freq_)] -= 1;
                 }
 
-                const uint64_t merged_count = static_cast<uint64_t>(count) + 1ULL;
+                uint64_t merged_count = static_cast<uint64_t>(count) + 1ULL;
+                // Clamp at count_max (max storable count for the file format)
+                if (merged_count > count_max_)
+                    merged_count = count_max_;
                 if (in_range(merged_count, min_freq_, max_freq_)) [[likely]]
                 {
                     local_histogram[histogram_index(merged_count, min_freq_)] += 1;
@@ -248,6 +252,7 @@ private:
     uint32_t min_freq_ = 0;
     uint32_t max_freq_ = 0;
     size_t hist_size_ = 0;
+    uint32_t count_max_ = std::numeric_limits<uint32_t>::max();
     uint64_t full_data_count_ = 0;
     uint64_t tail_bits_ = 0;
     uint64_t tail_bytes_ = 0;
