@@ -54,7 +54,7 @@ constexpr size_t REMOTE_LIST_CAPACITY = 32;
 
 // NUMA 节点迁移检测间隔：每多少次从 Arena refill 才检测一次当前 NUMA 节点
 // 取值越大，NUMA 检测开销越低，但迁移后发现并纠正的延迟也越大
-constexpr uint32_t NUMA_REFILL_CHECK_INTERVAL = 16;
+constexpr uint32_t NUMA_REFILL_CHECK_INTERVAL = 8;
 
 // 大页大小（2MB）
 constexpr size_t HUGE_PAGE_SIZE = 2ULL * 1024 * 1024;
@@ -462,8 +462,8 @@ inline void ConcurrentMemoryPool::init_numa_info()
         {
             total_cpus_ = 1;
             cpus_per_node_[0] = 1;
+        }
     }
-}
     else
     {
         // 无法获取亲和性，使用默认值
@@ -782,7 +782,7 @@ inline char* ConcurrentMemoryPool::bump_allocate_from_arena(Arena& arena, size_t
     size_t aligned_bytes = align_up(bytes, BLOCK_SIZE);
     char* arena_end = static_cast<char*>(arena.end_addr);
 
-    SpinBackoff backoff;
+    SpinBackoff<> backoff;
     for (;;)
     {
         char* cursor = arena.bump_cursor.load(std::memory_order_relaxed);
@@ -817,7 +817,7 @@ inline FreeBlock* ConcurrentMemoryPool::batch_allocate_from_bump(Arena& arena, s
     }
 
     char* arena_end = static_cast<char*>(arena.end_addr);
-    SpinBackoff backoff;
+    SpinBackoff<> backoff;
 
     for (;;)
     {
