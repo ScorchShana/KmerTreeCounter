@@ -76,6 +76,9 @@ public:
         {
             threads_ptr.push_back(std::make_unique<std::thread>([&, i]
                 {
+#if HAS_LIBNUMA
+                    numa_run_on_node(numa_nodes[i % numa_nodes.size()]);
+#endif
                     std::this_thread::sleep_for(std::chrono::nanoseconds(40));
                     FastqClassifier<N> classifier(k_len, i, parser_classifier_ring_pool, classifier_task_queues[i].get(), global_classifier_task_queue, tree, memory_pool, *start_barrier);
                     classifier.classify_and_push();

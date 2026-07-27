@@ -25,7 +25,7 @@ class FastqClassifier
     // 自旋参数
     static constexpr int SLEEP_THRESHOLD = 128;
     static constexpr int YIELD_THRESHOLD = 64;
-    static constexpr int MAX_BACKOFF = 256;
+    static constexpr int MAX_BACKOFF = 64;
 
     static constexpr uint64_t EXPORT_KMER_BLOCK_CAPACITY = EXPORT_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>);
     static constexpr uint32_t BLOOM_PREFETCH_DISTANCE = 8; // 预取 Bloom Filter 的距离（单位：k-mer数量）

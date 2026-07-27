@@ -352,7 +352,7 @@ class ReaderThreadPool
     };
 
     static constexpr uint64_t kNoNewlineInBlock = static_cast<uint64_t>(-1);
-    static constexpr uint64_t GZ_CHUNK_MULTIPLIER = 2;
+    static constexpr uint64_t GZ_CHUNK_SIZE = 512 * 1024; // 512 KB
 
     int k_;
     uint64_t base_chunk_size_;
@@ -570,21 +570,21 @@ private:
         {
             std::string file = assignments[cur_file_index];
             const bool is_gz = (file.size() >= 3 && file.compare(file.size() - 3, 3, ".gz") == 0);
-            const uint64_t effective_chunk_size = is_gz ? base_chunk_size_ * GZ_CHUNK_MULTIPLIER : base_chunk_size_;
+            const uint64_t effective_chunk_size = is_gz ? GZ_CHUNK_SIZE : base_chunk_size_;
 
             int fd = -1;
             gzFile gzfile = nullptr;
-
-            fd = ::open(file.c_str(), O_RDONLY);
-            if (fd == -1) { std::cerr << "Failed to open: " << file << std::endl; std::exit(-1); }
 
             if (is_gz)
             {
                 gzfile = gzopen(file.c_str(), "rb");
                 if (gzfile == nullptr) { std::cerr << "Failed to open gzip: " << file << std::endl; std::exit(-1); }
+                gzbuffer(gzfile, GZ_CHUNK_SIZE / 4);
             }
             else
             {
+                fd = ::open(file.c_str(), O_RDONLY);
+                if (fd == -1) { std::cerr << "Failed to open: " << file << std::endl; std::exit(-1); }
                 posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
             }
 

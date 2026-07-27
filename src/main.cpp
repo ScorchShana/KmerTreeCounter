@@ -11,6 +11,7 @@
 #include "FastqPreReader.h"
 #include "FastqParser.h"
 #include "FastqPreParser.h"
+#include "definition.h"
 
 #include <chrono>
 #include <iostream>
@@ -215,6 +216,31 @@ void calculate_concurrent_map_capacity(
 #endif
 }
 
+void get_numa_nodes()
+{
+#if HAS_LIBNUMA
+    if (numa_available() == -1)
+    {
+        numa_nodes.push_back(0);
+    }
+    else
+    {
+        struct bitmask* mask = numa_all_nodes_ptr;
+        // 遍历所有可能的节点编号（从0到最大可能节点）
+        for (int i = 0; i <= numa_max_node(); i++) {
+            if (numa_bitmask_isbitset(mask, i)) {
+                numa_nodes.push_back(i);
+#ifdef TEST_MODE
+                std::cout << "NUMA node " << i << " is available." << std::endl;
+#endif
+            }
+        }
+    }
+#else
+    numa_nodes.push_back(0);
+#endif
+
+    }
 
 template<uint32_t N>
 int process_main()
@@ -311,6 +337,8 @@ int process_main()
     lpt(prefix_counts, classifier_num);
     calculate_bloom_filter_capacity(prefix_counts, estimated_file_size);
     calculate_concurrent_map_capacity(prefix_counts);
+
+    get_numa_nodes();
 
     // 确保 Arena 已初始化，才能安全分配内存
     pool->init_arenas();
@@ -567,7 +595,7 @@ int main(int argc, char* argv[])
     ::write(fd, &k_len, sizeof(k_len));
     ::write(fd, &count_max, sizeof(count_max));
     ::close(fd);
-    
+
     if (count_max <= 0xFF)
     {
         count_max_bytes = 1;

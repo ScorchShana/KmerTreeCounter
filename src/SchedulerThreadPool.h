@@ -62,7 +62,7 @@ class SchedulerThreadPool final
     std::barrier<> drain_root_done_barrier_;
     FinalDrainWriterThread drain_writer_thread_;
 
-    inline static thread_local SpinBackoff<128, 128, 256 * 1024> backoff;
+    inline static thread_local SpinBackoff<> backoff;
 
 public:
     explicit SchedulerThreadPool(uint32_t thread_count, uint32_t producer_count, uint32_t extra_drain_thread_count,
@@ -70,10 +70,10 @@ public:
         : thread_count_(thread_count > 1 ? thread_count : 2), extra_drain_thread_count_(extra_drain_thread_count),
         active_producer(producer_count), tree_ptr_(tree_ptr),
         layer_queues_ptr_(layer_queues_ptr), worker_commands_(thread_count_ - 1), worker_infos(thread_count_ - 1),
-    drain_all_done_barrier(thread_count_ - 1 + extra_drain_thread_count_),
-    drain_root_done_barrier_(thread_count_ - 1 + extra_drain_thread_count_),
-    drain_writer_thread_(FINAL_DRAIN_RING_POOL_BLOCK_SIZE,
-                  thread_count_ - 1 + extra_drain_thread_count_)
+        drain_all_done_barrier(thread_count_ - 1 + extra_drain_thread_count_),
+        drain_root_done_barrier_(thread_count_ - 1 + extra_drain_thread_count_),
+        drain_writer_thread_(FINAL_DRAIN_RING_POOL_BLOCK_SIZE,
+            thread_count_ - 1 + extra_drain_thread_count_)
     {
         for (auto& cmd : worker_commands_)
             cmd.store(INVALID_DEPTH, std::memory_order_relaxed);
@@ -248,6 +248,9 @@ private:
 
     void worker_thread_loop(const uint32_t worker_id)
     {
+#if HAS_LIBNUMA
+        numa_run_on_node(numa_nodes[(worker_id + 1) % numa_nodes.size()]);
+#endif
         ConcurrentMap<N>::set_thread_id(worker_id);
         uint32_t loop_round = 0;
 

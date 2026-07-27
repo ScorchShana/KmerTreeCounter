@@ -14,6 +14,16 @@
 #include <barrier>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+// NUMA 支持 - 自动检测 libnuma 是否可用
+#if __has_include(<numa.h>)
+#include <numa.h>
+#include <numaif.h>
+#define HAS_LIBNUMA 1
+#else
+#define HAS_LIBNUMA 0
+#endif
 
 constexpr uint64_t PAGE_SIZE = 4096;
 
@@ -48,7 +58,7 @@ constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY = 1ULL << 12;    
 constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE = 32ULL * 1024; // 环形内存池块大小（字节）
 
 // Classifier 线程的任务队列配置常量
-constexpr uint64_t GLOBAL_CLASSIFIER_TASK_QUEUE_CAPACITY = 1ULL << 10; // 全局分类器任务队列容量
+constexpr uint64_t GLOBAL_CLASSIFIER_TASK_QUEUE_CAPACITY = 16ULL << 10; // 全局分类器任务队列容量
 constexpr uint64_t CLASSIFIER_TASK_QUEUES_CAPACITY = 64;
 
 // 写入文件部分的RingMemoryPool配置常量
@@ -199,5 +209,8 @@ inline std::array<void*, 1U << (2 * ROOT_BASES)> global_bloom_filter{};
 inline std::array<uint64_t, 1U << (2 * ROOT_BASES)> concurrent_map_capacity;
 
 inline uint8_t avgQuality = 0;
+
+// numa 节点
+inline std::vector<int> numa_nodes;
 
 #endif // TREE_DEFINITION_HEADER

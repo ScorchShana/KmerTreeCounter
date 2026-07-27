@@ -297,9 +297,6 @@ template <uint32_t N>
 class ExportWriter
 {
 
-    constexpr static int MAX_SPIN_TIME = 1024;
-    constexpr static int MAX_BACKOFF = 128;
-
     // constexpr static uint64_t RAW_BUFFER_SIZE = 1ULL * 1024 * 1024; // 1MB 原始数据块大小
     constexpr static uint64_t RAW_BUFFER_SIZE = 512 * 1024;
     constexpr static uint32_t NUM_AIO_BUFFERS = 4;

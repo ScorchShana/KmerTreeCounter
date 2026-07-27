@@ -24,14 +24,7 @@
 #include <unistd.h>
 #include <errno.h>
 
-// NUMA 支持 - 自动检测 libnuma 是否可用
-#if __has_include(<numa.h>)
-#include <numa.h>
-#include <numaif.h>
-#define HAS_LIBNUMA 1
-#else
-#define HAS_LIBNUMA 0
-#endif
+
 
 //==============================================================================
 // 可配置常量
@@ -232,6 +225,9 @@ private:
 
     // 构建按 NUMA 距离排序的候选 Arena 索引列表（用于本地 Arena 耗尽时窃取）
     inline void build_numa_distance_order();
+
+    // 应用 mbind 将每个 Arena 的内存绑定到对应 NUMA 节点
+    inline void apply_arena_mbind();
 
     //----------------------------------------------------------------------
     // 成员变量
@@ -442,6 +438,9 @@ inline void ConcurrentMemoryPool::init_numa_info()
             }
             cpus_per_node_[node] = count;
             total_cpus_ += count;
+#ifdef TEST_MODE
+            std::cout << "NUMA node " << node << ": " << count << " CPUs" << std::endl;
+#endif
         }
 
         // 如果没有找到 CPU，使用默认值
@@ -565,6 +564,44 @@ inline void ConcurrentMemoryPool::mmap_total_memory(size_t total_bytes)
     }
 }
 
+inline void ConcurrentMemoryPool::apply_arena_mbind()
+{
+#if HAS_LIBNUMA
+    if (!numa_available_ || num_arenas_ <= 1)
+        return;
+
+    // nodemask：一个 unsigned long[2] = 128 bit，足以覆盖 MAX_NUMA_NODES=16。
+    // 不依赖 numaif.h 的 nodemask_t 类型细节，避免可移植性问题。
+    for (int i = 0; i < num_arenas_; ++i)
+    {
+        void* start = arenas_[i].start_addr;
+        size_t len = static_cast<size_t>(
+            static_cast<char*>(arenas_[i].end_addr) -
+            static_cast<char*>(arenas_[i].start_addr));
+        if (!start || len == 0)
+            continue;
+
+        unsigned long nodemask[2] = { (1UL << i), 0 };
+        int maxnode_bits = static_cast<int>(sizeof(nodemask) * 8);
+
+        // flags = 0 的含义：
+        //   - 不带 MPOL_MF_MOVE : 此时该区域尚无 page,无迁移成本
+        //   - 不带 MPOL_MF_STRICT: 不要求已存 page 符合 policy
+        // 后续 lazy fault / khugepaged collapse 均读此 VMA policy。
+        if (mbind(start, len, MPOL_BIND, nodemask, maxnode_bits, 0) != 0)
+        {
+            std::cerr << "mbind failed on arena " << i
+                << " (len=" << len << ", node=" << i
+                << "): errno=" << errno
+                << ", falling back to default policy" << std::endl;
+            // 不 std::exit：允许降级到内核默认策略,保留可用性
+        }
+    }
+#else
+    // 没有 libnuma:无 mbind 调用,单节点本地分配即可
+#endif
+}
+
 inline void* ConcurrentMemoryPool::allocate_before_init_arenas(uint64_t bytes)
 {
     if (bytes == 0)
@@ -666,6 +703,8 @@ inline void ConcurrentMemoryPool::init_arenas()
         current_addr += arena_bytes;
         remaining_blocks -= arena_blocks;
     }
+
+    // apply_arena_mbind();
 
     // 所有 Arena 设置完成后，release 发布，确保对后续线程可见
     arenas_initialized_.store(true, std::memory_order_release);
@@ -769,7 +808,7 @@ inline char* ConcurrentMemoryPool::bump_allocate_from_arena(Arena& arena, size_t
     size_t aligned_bytes = align_up(bytes, BLOCK_SIZE);
     char* arena_end = static_cast<char*>(arena.end_addr);
 
-    SpinBackoff backoff;
+    SpinBackoff<> backoff;
     for (;;)
     {
         char* cursor = arena.bump_cursor.load(std::memory_order_relaxed);

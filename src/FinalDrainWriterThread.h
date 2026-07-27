@@ -96,14 +96,14 @@ private:
             buffer_[i] = static_cast<char*>(buffer_ptr);
         }
 
-        SpinBackoff<128, 128, 256 * 1024> backoff;
+        SpinBackoff<> backoff;
         content_type content;
 
         while (true)
         {
             if (pool_.consumer_try_dequeue(content))
             {
-                backoff.decay();
+                backoff.double_decay();
                 process_block(content);
             }
             else if (pool_.producer_finished())
