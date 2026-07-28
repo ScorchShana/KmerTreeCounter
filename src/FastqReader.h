@@ -579,7 +579,7 @@ private:
             {
                 gzfile = gzopen(file.c_str(), "rb");
                 if (gzfile == nullptr) { std::cerr << "Failed to open gzip: " << file << std::endl; std::exit(-1); }
-                gzbuffer(gzfile, GZ_CHUNK_SIZE / 4);
+                gzbuffer(gzfile, GZ_CHUNK_SIZE / 2);
             }
             else
             {
