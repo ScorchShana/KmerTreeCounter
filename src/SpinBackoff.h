@@ -6,7 +6,7 @@
 #include <chrono>
 
 
-template <int MAX_BACKOFF = 64, int YIELD_THRESHOLD = 64, int SLEEP_THRESHOLD = 128>
+template <int MAX_BACKOFF = 64, int YIELD_THRESHOLD = 64, int SLEEP_THRESHOLD = 64 + 16>
 class SpinBackoff {
     static constexpr int BACKOFF_START = 1; // 初始 backoff 次数为 1
     static constexpr int MAX_SLEEP_TIME_US = 500; // 最大睡眠时间为 500 微秒

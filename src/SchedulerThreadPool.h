@@ -32,8 +32,9 @@ class SchedulerThreadPool final
     // Scheduler algorithm constants
     static constexpr uint32_t SCHEDULE_INTERVAL_NS = 500;
     static constexpr double PRESSURE_EMA_ALPHA = 0.6;
-    static constexpr double HYSTERESIS_LOG_DELTA = 0.585;          // log2(1.5)
+    static constexpr double HYSTERESIS_LOG_DELTA = std::log2(1.7);          // log2(1.5)
     static constexpr uint32_t DRAIN_INTERVAL_NS = 250;
+    static constexpr double SELF_SCHEDULE_LOG_DELTA = HYSTERESIS_LOG_DELTA * 0.3;
 
     struct WorkerInfo
     {
@@ -63,8 +64,16 @@ class SchedulerThreadPool final
     FinalDrainWriterThread drain_writer_thread_;
 
     inline static thread_local SpinBackoff<> backoff;
+    inline static thread_local uint32_t self_schedule_depth = INVALID_DEPTH;
+    inline static thread_local uint32_t self_schedule_denominator = 1;
 
 public:
+
+#ifdef TEST_MODE
+    alignas(CACHE_LINE_SIZE) std::atomic<uint64_t> final_drain_writer_producer_enqueue_spin_time{ 0 };
+    alignas(CACHE_LINE_SIZE) std::atomic<uint64_t> final_drain_writer_producer_dequeue_spin_time{ 0 };
+#endif
+
     explicit SchedulerThreadPool(uint32_t thread_count, uint32_t producer_count, uint32_t extra_drain_thread_count,
         KmerTree<N>* tree_ptr, LayerQueues<N>* layer_queues_ptr)
         : thread_count_(thread_count > 1 ? thread_count : 2), extra_drain_thread_count_(extra_drain_thread_count),
@@ -117,6 +126,10 @@ public:
                 t->join();
             }
         }
+#ifdef TEST_MODE
+        std::cout << "Final drain writer producer enqueue spin time: " << final_drain_writer_producer_enqueue_spin_time.load(std::memory_order_relaxed) << std::endl;
+        std::cout << "Final drain writer producer dequeue spin time: " << final_drain_writer_producer_dequeue_spin_time.load(std::memory_order_relaxed) << std::endl;
+#endif
         drain_writer_thread_.join();
     }
 
@@ -186,11 +199,18 @@ private:
     bool try_switch_depth(const uint32_t worker_id, const uint32_t depth)
     {
         const uint32_t max_process_task = (depth + 1 == INVALID_DEPTH) ? MAX_PROCESS_TASKS / 2 : MAX_PROCESS_TASKS;
-        uint32_t processed = process_batch_at_depth(depth);
+        uint32_t processed = process_batch_at_depth(depth, max_process_task / self_schedule_denominator);
+        const uint32_t cur_denominator = self_schedule_denominator;
+        self_schedule_denominator = 1;
 
         uint32_t new_depth = worker_commands_[worker_id].exchange(INVALID_DEPTH, std::memory_order_acq_rel);
         if (new_depth != INVALID_DEPTH)
         {
+            if (self_schedule_depth != INVALID_DEPTH)
+            {
+                self_schedule_denominator = (self_schedule_depth == new_depth) ? 2 : 1;
+                self_schedule_depth = INVALID_DEPTH;
+            }
             worker_infos[worker_id].depth.store(new_depth, std::memory_order_release);
             depth_worker_count[depth].fetch_sub(1, std::memory_order_release);
             depth_worker_count[new_depth].fetch_add(1, std::memory_order_release);
@@ -199,7 +219,7 @@ private:
         }
         else
         {
-            if (processed == MAX_PROCESS_TASKS)
+            if (processed == MAX_PROCESS_TASKS / cur_denominator)
             {
                 backoff.double_decay();
             }
@@ -218,9 +238,27 @@ private:
                 {
                     if (d == depth) continue;
                     uint32_t qsize = layer_queues_ptr_->get_queue(d)->size();
-                    if (qsize > MAX_PROCESS_TASKS * 2)
+                    const int depth_worker_num = depth_worker_count[d].load(std::memory_order_relaxed);
+                    // const int hard_worker_upper_bound = std::max<int>(1, (thread_count_ - 1) * 3 / 4);
+                    // if (depth_worker_num >= hard_worker_upper_bound) continue;
+                    // double raw = static_cast<double>(qsize) / (depth_worker_num + 1.0);
+                    // double depth_ema_pressure = std::log2(raw + 1.0);
+                    // if (depth_ema_pressure > SELF_SCHEDULE_LOG_DELTA)
+                    // {
+                    //     worker_commands_[worker_id].store(d, std::memory_order_release);
+                    //     self_schedule_depth = d;
+                    //     return false;
+                    // }
+                    if (d + 1 < MAX_DEPTH && qsize > 0.3 * depth_worker_num * MAX_PROCESS_TASKS)
                     {
                         worker_commands_[worker_id].store(d, std::memory_order_release);
+                        self_schedule_depth = d;
+                        return false;
+                    }
+                    else if (d + 1 == MAX_DEPTH && qsize > 0.3 * depth_worker_num * MAX_PROCESS_TASKS / 2)
+                    {
+                        worker_commands_[worker_id].store(d, std::memory_order_release);
+                        self_schedule_depth = d;
                         return false;
                     }
                 }
@@ -299,6 +337,10 @@ private:
                             ConcurrentMap<N>::export_thread_node_count(writer, extra_id);
                             writer.close();
                             drain_writer_thread_.pool()->producer_set_finished();
+#ifdef TEST_MODE
+                            final_drain_writer_producer_enqueue_spin_time.fetch_add(writer.producer_enqueue_spin_time, std::memory_order_relaxed);
+                            final_drain_writer_producer_dequeue_spin_time.fetch_add(writer.producer_dequeue_spin_time, std::memory_order_relaxed);
+#endif
                         });
                 }
             }
@@ -321,6 +363,10 @@ private:
             ConcurrentMap<N>::export_thread_node_count(writer, worker_id);
             writer.close();
             drain_writer_thread_.pool()->producer_set_finished();
+#ifdef TEST_MODE
+            final_drain_writer_producer_enqueue_spin_time.fetch_add(writer.producer_enqueue_spin_time, std::memory_order_relaxed);
+            final_drain_writer_producer_dequeue_spin_time.fetch_add(writer.producer_dequeue_spin_time, std::memory_order_relaxed);
+#endif
         }
 
         if (worker_id == 0 && extra_drain_thread_count_ > 0) [[unlikely]]
@@ -354,7 +400,13 @@ private:
         for (uint32_t d = 0; d < MAX_DEPTH; ++d)
         {
             uint32_t qsize = layer_queues_ptr_->get_queue(d)->size();
-            double raw = static_cast<double>(qsize + hidden_size[d]) / (worker_snapshot[d] + 1.0);
+            double raw;
+            if (d + 1 < MAX_DEPTH) {
+                raw = static_cast<double>(qsize + hidden_size[d]) / (worker_snapshot[d] + 1.0) / MAX_PROCESS_TASKS;
+            }
+            else {
+                raw = static_cast<double>(qsize + hidden_size[d]) / (worker_snapshot[d] + 1.0) / MAX_PROCESS_TASKS * 2.0;
+            }
             double log_raw = std::log2(raw + 1.0);
             depth_ema_pressure_[d] = PRESSURE_EMA_ALPHA * log_raw + (1.0 - PRESSURE_EMA_ALPHA) * depth_ema_pressure_[d];
         }
@@ -380,7 +432,7 @@ private:
             std::max<uint32_t>(1, total_workers / 2),
             distributable);
 
-        if (total_ema > 0.01)
+        if (total_ema > 0.05)
         {
             for (uint32_t d = 0; d < MAX_DEPTH; ++d)
             {

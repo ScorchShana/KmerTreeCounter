@@ -109,10 +109,11 @@ private:
         return h;
     }
 
-    // Extract fingerprint from hash (high 7 bits, ensure non-zero)
-    static uint8_t fingerprint(uint64_t hash)
+    // Extract fingerprint from hash (high 8 bits, ensure non-zero)
+    static uint8_t fingerprint(const uint64_t h)
     {
-        return static_cast<uint8_t>((hash >> 57) | 0x01);
+        uint8_t fp = static_cast<uint8_t>(h >> 56);  // 用满 8 位
+        return fp == 0 ? 0xFF : fp;
     }
 
     // SIMD match and empty detection

@@ -5,6 +5,7 @@
 #include "RingMemoryPool.h"
 #include "SPSCRingQueue.h"
 #include "SpinBackoff.h"
+#include "GzipStreamer.h"
 
 #include <cassert>
 #include <cstdio>
@@ -565,6 +566,8 @@ private:
         size_t left_buffer_size_ = 0;
         const uint64_t overlap = (k_ > 1) ? static_cast<uint64_t>(k_ - 1) : 0;
 
+        GzipStreamer gzip_streamer;
+
         uint64_t cur_file_index = file_index_.fetch_add(1, std::memory_order_relaxed);
         for (; cur_file_index < assignments.size(); cur_file_index = file_index_.fetch_add(1, std::memory_order_relaxed))
         {
@@ -577,6 +580,7 @@ private:
 
             if (is_gz)
             {
+                // gzip_streamer.open(file);
                 gzfile = gzopen(file.c_str(), "rb");
                 if (gzfile == nullptr) { std::cerr << "Failed to open gzip: " << file << std::endl; std::exit(-1); }
                 gzbuffer(gzfile, GZ_CHUNK_SIZE / 2);
@@ -599,16 +603,30 @@ private:
 
             uint64_t input_pos = 0, input_size = 0;
             bool eof = false;
+            char* input_begin = read_buf.data();
 
             while (true)
             {
+                // char* input_begin = read_buf.data();
                 if (input_pos >= input_size && !eof)
                 {
                     ssize_t bytes_read;
                     if (is_gz)
+                    {
                         bytes_read = gzread(gzfile, read_buf.data(), static_cast<unsigned int>(effective_chunk_size));
+                        input_begin = read_buf.data();
+                        // uint8_t* gzip_input_data = nullptr;
+                        // size_t gizp_bytes_read = 0;
+                        // gzip_streamer.next(gzip_input_data, gizp_bytes_read);
+                        // input_begin = reinterpret_cast<char*>(gzip_input_data);
+                        // bytes_read = static_cast<ssize_t>(gizp_bytes_read);
+                    }
                     else
+                    {
                         bytes_read = ::read(fd, read_buf.data(), effective_chunk_size);
+                        input_begin = read_buf.data();
+                    }
+
 
                     if (bytes_read < 0) [[unlikely]]
                     {
@@ -635,7 +653,7 @@ private:
                     continue;
                 }
 
-                const char* input_begin = read_buf.data();
+                // const char* input_begin = read_buf.data();
                 if (state_ != State::ReadSequence)
                 {
                     const char* cur = input_begin + input_pos;
@@ -669,7 +687,8 @@ private:
                 state_ = advance_state(state_);
             }
 
-            if (is_gz) gzclose(gzfile);
+            // if (is_gz) gzip_streamer.close();
+            if(is_gz) gzclose(gzfile);
             else ::close(fd);
 
             std::cout << "FastqReader: completed " << file << std::endl;
