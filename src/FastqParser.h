@@ -33,9 +33,9 @@ template <uint32_t N>
 class FastqParser
 {
     // 自旋参数
-    static constexpr int SLEEP_THRESHOLD = 128;
-    static constexpr int YIELD_THRESHOLD = 64;
-    static constexpr int MAX_BACKOFF = 256;
+    static constexpr int SLEEP_THRESHOLD = 128 + 32;
+    static constexpr int YIELD_THRESHOLD = 128;
+    static constexpr int MAX_BACKOFF = 64;
 
     int k_len;
 
@@ -60,7 +60,7 @@ class FastqParser
 
     GetKmer<N> get_kmer;
 
-    SpinBackoff<MAX_BACKOFF / 2, YIELD_THRESHOLD * 2, SLEEP_THRESHOLD * 2> enqueue_to_classifier_backoff;
+    SpinBackoff<MAX_BACKOFF, YIELD_THRESHOLD, SLEEP_THRESHOLD> enqueue_to_classifier_backoff;
     SpinBackoff<MAX_BACKOFF, YIELD_THRESHOLD, SLEEP_THRESHOLD> dequeue_from_classifier_backoff;
 
     SplitMix64 rng;

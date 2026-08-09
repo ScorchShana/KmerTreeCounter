@@ -5,6 +5,7 @@
 #include "RingMemoryPool.h"
 #include "SPSCRingQueue.h"
 #include "SpinBackoff.h"
+#include "GzipStreamer.h"
 
 #include <cassert>
 #include <cstdio>
@@ -23,6 +24,7 @@
 #include <zlib.h>
 #include <thread>
 #include <atomic>
+#include <algorithm>
 
 template <uint32_t N>
 class FastqReader
@@ -351,7 +353,7 @@ class ReaderThreadPool
     };
 
     static constexpr uint64_t kNoNewlineInBlock = static_cast<uint64_t>(-1);
-    static constexpr uint64_t GZ_CHUNK_MULTIPLIER = 2;
+    static constexpr uint64_t GZ_CHUNK_SIZE = 512 * 1024; // 512 KB
 
     int k_;
     uint64_t base_chunk_size_;
@@ -361,6 +363,9 @@ class ReaderThreadPool
     std::vector<std::string> plain_files_;
     uint32_t reader_count_;
     std::vector<std::unique_ptr<std::thread>> threads_;
+    std::vector<std::string> assignments;
+
+    alignas(CACHE_LINE_SIZE) std::atomic<uint64_t> file_index_{ 0 };
 
     inline static thread_local SpinBackoff<> enqueue_backoff;
     inline static thread_local SpinBackoff<> dequeue_backoff;
@@ -379,6 +384,7 @@ public:
         if (filenames.empty()) { std::cerr << "No input files" << std::endl; std::exit(-1); }
 
         classify_files(filenames);
+        sort_files_by_size();
 
         reader_count_ = (gz_files_.size() >= 2) ? 2 : 1;
         threads_.reserve(reader_count_);
@@ -386,16 +392,17 @@ public:
 
     void start()
     {
-        std::vector<std::vector<std::string>> assignments(reader_count_);
+        file_index_.store(0, std::memory_order_relaxed);
+        assignments.clear();
         for (size_t i = 0; i < gz_files_.size(); ++i)
-            assignments[i % reader_count_].push_back(gz_files_[i]);
+            assignments.push_back(gz_files_[i]);
         for (size_t i = 0; i < plain_files_.size(); ++i)
-            assignments[i % reader_count_].push_back(plain_files_[i]);
+            assignments.push_back(plain_files_[i]);
 
         for (uint32_t i = 0; i < reader_count_; ++i)
         {
-            threads_.push_back(std::make_unique<std::thread>([this, assigned = std::move(assignments[i])]() {
-                reader_worker(assigned);
+            threads_.push_back(std::make_unique<std::thread>([this]() {
+                reader_worker();
                 }));
         }
     }
@@ -418,6 +425,54 @@ private:
             else
                 plain_files_.push_back(f);
         }
+    }
+
+    void sort_files_by_size()
+    {
+        struct file_info {
+            std::string filename;
+            uint64_t size;
+        };
+        std::vector<file_info> infos;
+
+        for (const auto& gz_filename : gz_files_)
+        {
+            struct stat st;
+            uint64_t file_size = 0;
+            if (stat(gz_filename.c_str(), &st) == -1) file_size = 0;
+            else file_size = static_cast<uint64_t>(st.st_size);
+            infos.push_back({ gz_filename, file_size });
+        }
+
+        std::sort(infos.begin(), infos.end(), [](const file_info& a, const file_info& b) {
+            return a.size > b.size;
+            });
+        gz_files_.clear();
+        for (const auto& info : infos)
+        {
+            gz_files_.push_back(info.filename);
+        }
+
+        infos.clear();
+        for (const auto& plain_filename : plain_files_)
+        {
+            struct stat st;
+            uint64_t file_size = 0;
+            if (stat(plain_filename.c_str(), &st) == -1) file_size = 0;
+            else file_size = static_cast<uint64_t>(st.st_size);
+            infos.push_back({ plain_filename, file_size });
+        }
+
+        std::sort(infos.begin(), infos.end(), [](const file_info& a, const file_info& b) {
+            return a.size > b.size;
+            });
+        plain_files_.clear();
+        for (const auto& info : infos)
+        {
+            plain_files_.push_back(info.filename);
+        }
+
+
     }
 
     static State advance_state(const State current)
@@ -501,7 +556,7 @@ private:
         left_buffer_size_ = static_cast<size_t>(keep);
     }
 
-    void reader_worker(const std::vector<std::string>& assigned_files)
+    void reader_worker()
     {
         assert(ring_pool_ptr_ != nullptr);
         const uint64_t block_size = ring_pool_ptr_->blockSize();
@@ -511,24 +566,29 @@ private:
         size_t left_buffer_size_ = 0;
         const uint64_t overlap = (k_ > 1) ? static_cast<uint64_t>(k_ - 1) : 0;
 
-        for (const auto& file : assigned_files)
+        GzipStreamer gzip_streamer;
+
+        uint64_t cur_file_index = file_index_.fetch_add(1, std::memory_order_relaxed);
+        for (; cur_file_index < assignments.size(); cur_file_index = file_index_.fetch_add(1, std::memory_order_relaxed))
         {
+            std::string file = assignments[cur_file_index];
             const bool is_gz = (file.size() >= 3 && file.compare(file.size() - 3, 3, ".gz") == 0);
-            const uint64_t effective_chunk_size = is_gz ? base_chunk_size_ * GZ_CHUNK_MULTIPLIER : base_chunk_size_;
+            const uint64_t effective_chunk_size = is_gz ? GZ_CHUNK_SIZE : base_chunk_size_;
 
             int fd = -1;
             gzFile gzfile = nullptr;
 
-            fd = ::open(file.c_str(), O_RDONLY);
-            if (fd == -1) { std::cerr << "Failed to open: " << file << std::endl; std::exit(-1); }
-
             if (is_gz)
             {
+                // gzip_streamer.open(file);
                 gzfile = gzopen(file.c_str(), "rb");
                 if (gzfile == nullptr) { std::cerr << "Failed to open gzip: " << file << std::endl; std::exit(-1); }
+                gzbuffer(gzfile, GZ_CHUNK_SIZE / 2);
             }
             else
             {
+                fd = ::open(file.c_str(), O_RDONLY);
+                if (fd == -1) { std::cerr << "Failed to open: " << file << std::endl; std::exit(-1); }
                 posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
             }
 
@@ -543,16 +603,30 @@ private:
 
             uint64_t input_pos = 0, input_size = 0;
             bool eof = false;
+            char* input_begin = read_buf.data();
 
             while (true)
             {
+                // char* input_begin = read_buf.data();
                 if (input_pos >= input_size && !eof)
                 {
                     ssize_t bytes_read;
                     if (is_gz)
+                    {
                         bytes_read = gzread(gzfile, read_buf.data(), static_cast<unsigned int>(effective_chunk_size));
+                        input_begin = read_buf.data();
+                        // uint8_t* gzip_input_data = nullptr;
+                        // size_t gizp_bytes_read = 0;
+                        // gzip_streamer.next(gzip_input_data, gizp_bytes_read);
+                        // input_begin = reinterpret_cast<char*>(gzip_input_data);
+                        // bytes_read = static_cast<ssize_t>(gizp_bytes_read);
+                    }
                     else
+                    {
                         bytes_read = ::read(fd, read_buf.data(), effective_chunk_size);
+                        input_begin = read_buf.data();
+                    }
+
 
                     if (bytes_read < 0) [[unlikely]]
                     {
@@ -579,7 +653,7 @@ private:
                     continue;
                 }
 
-                const char* input_begin = read_buf.data();
+                // const char* input_begin = read_buf.data();
                 if (state_ != State::ReadSequence)
                 {
                     const char* cur = input_begin + input_pos;
@@ -613,7 +687,8 @@ private:
                 state_ = advance_state(state_);
             }
 
-            if (is_gz) gzclose(gzfile);
+            // if (is_gz) gzip_streamer.close();
+            if(is_gz) gzclose(gzfile);
             else ::close(fd);
 
             std::cout << "FastqReader: completed " << file << std::endl;

@@ -29,6 +29,12 @@ private:
     SpinBackoff<> enqueue_backoff;
 
 public:
+
+#ifdef TEST_MODE
+    uint64_t producer_enqueue_spin_time{ 0 };
+    uint64_t producer_dequeue_spin_time{ 0 };
+#endif
+
     FinalDrainWriter(const FinalDrainWriter&) = delete;
     FinalDrainWriter& operator=(const FinalDrainWriter&) = delete;
     FinalDrainWriter(FinalDrainWriter&&) = delete;
@@ -96,7 +102,7 @@ public:
             {
                 continue;
             }
-            
+
             std::memcpy(current_block_ + current_offset_, node.k_mer.data.data(),
                 full_words * sizeof(uint64_t));
             current_offset_ += full_words * sizeof(uint64_t);
@@ -148,26 +154,40 @@ private:
         }
         else
         {
+#ifdef TEST_MODE
+            producer_enqueue_spin_time++;
+#endif
+            enqueue_backoff.backoff();
             while (!pool_->producer_try_enqueue({ current_block_, current_offset_ }))
             {
                 enqueue_backoff.backoff();
+#ifdef TEST_MODE
+                producer_enqueue_spin_time++;
+#endif
             }
             enqueue_backoff.decay();
         }
-        
+
         if (pool_->producer_try_dequeue(current_block_))
         {
             dequeue_backoff.double_decay();
         }
         else
         {
-            while(!pool_->producer_try_dequeue(current_block_))
+#ifdef TEST_MODE
+            producer_dequeue_spin_time++;
+#endif
+            dequeue_backoff.backoff();
+            while (!pool_->producer_try_dequeue(current_block_))
             {
                 dequeue_backoff.backoff();
+#ifdef TEST_MODE
+                producer_dequeue_spin_time++;
+#endif
             }
             dequeue_backoff.decay();
         }
-        
+
         current_offset_ = 0;
     }
 };

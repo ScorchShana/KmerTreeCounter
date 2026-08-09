@@ -32,7 +32,15 @@ class FinalDrainWriterThread
     uint32_t current_buffer_index_ = 0;
     uint64_t file_offset_ = 0;
 
+    SpinBackoff<> consumer_enqueue_backoff;
+
 public:
+
+#ifdef TEST_MODE
+    bool first_flag = false;
+    uint64_t consumer_enqueue_spin_time{ 0 };
+    uint64_t consumer_dequeue_spin_time{ 0 };
+#endif
     FinalDrainWriterThread(uint32_t block_size, uint32_t producer_count)
         : pool_(block_size, producer_count), fd_(-1) {
     }
@@ -80,6 +88,10 @@ public:
     ~FinalDrainWriterThread()
     {
         join();
+#ifdef TEST_MODE
+        std::cout << "Final Drain Writer Thread consumer enqueue spin time: " << consumer_enqueue_spin_time << std::endl;
+        std::cout << "Final Drain Writer Thread consumer dequeue spin time: " << consumer_dequeue_spin_time << std::endl;
+#endif
     }
 
 private:
@@ -96,14 +108,18 @@ private:
             buffer_[i] = static_cast<char*>(buffer_ptr);
         }
 
-        SpinBackoff<128, 128, 256 * 1024> backoff;
+        SpinBackoff<> backoff;
         content_type content;
 
         while (true)
         {
             if (pool_.consumer_try_dequeue(content))
             {
-                backoff.decay();
+#ifdef TEST_MODE
+                first_flag = true;
+#endif
+
+                backoff.double_decay();
                 process_block(content);
             }
             else if (pool_.producer_finished())
@@ -117,6 +133,10 @@ private:
             }
             else
             {
+#ifdef TEST_MODE
+                if (first_flag) consumer_dequeue_spin_time++;
+#endif
+
                 backoff.backoff();
             }
         }
@@ -159,7 +179,7 @@ private:
 
             async_write(current_buffer_index_);
             current_buffer_index_ = (current_buffer_index_ + 1) % NUM_AIO_BUFFERS;
-            wait_write_finish(current_buffer_index_); 
+            wait_write_finish(current_buffer_index_);
 
             std::memcpy(buffer_[current_buffer_index_], content.data + to_copy, remaining);
             buffer_count_[current_buffer_index_] = remaining;
@@ -170,7 +190,26 @@ private:
                 content.data, content.length);
             buffer_count_[current_buffer_index_] += content.length;
         }
-        pool_.consumer_enqueue(content.data);
+
+        if (pool_.consumer_try_enqueue(content.data))
+        {
+            consumer_enqueue_backoff.double_decay();
+        }
+        else
+        {
+#ifdef TEST_MODE
+            consumer_enqueue_spin_time++;
+#endif
+            consumer_enqueue_backoff.backoff();
+            while (!pool_.consumer_try_enqueue(content.data))
+            {
+#ifdef TEST_MODE
+                consumer_enqueue_spin_time++;
+#endif
+                consumer_enqueue_backoff.backoff();
+            }
+            consumer_enqueue_backoff.decay();
+        }
     }
 
     void async_write(uint32_t idx)
