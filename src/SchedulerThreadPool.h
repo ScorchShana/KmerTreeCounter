@@ -26,15 +26,16 @@ class SchedulerThreadPool final
 {
     // Worker thread constants
     static constexpr uint32_t INVALID_DEPTH = MAX_DEPTH;
-    static constexpr uint32_t DRAIN_EMPTY_CONFIRM_ROUNDS = 8;
+    static constexpr uint32_t DRAIN_EMPTY_CONFIRM_ROUNDS = 3;
     static constexpr uint32_t MAX_PROCESS_TASKS = 128;
     static constexpr uint32_t FORCE_DEAL_WITH_LOCAL_STACK_ROUND = 32;
+    static constexpr uint32_t LAST_DEPTH_DENOMINATOR = 2;
     // Scheduler algorithm constants
     static constexpr uint32_t SCHEDULE_INTERVAL_NS = 500;
     static constexpr double PRESSURE_EMA_ALPHA = 0.6;
-    static constexpr double HYSTERESIS_LOG_DELTA = std::log2(1.7);          // log2(1.5)
+    static constexpr double HYSTERESIS_LOG_DELTA = std::log2(1.7);          // log2(1.7)
     static constexpr uint32_t DRAIN_INTERVAL_NS = 250;
-    static constexpr double SELF_SCHEDULE_LOG_DELTA = HYSTERESIS_LOG_DELTA * 0.3;
+    static constexpr double SELF_SCHEDULE_LOG_DELTA = std::log2(1.5); // log2(1.5)
 
     struct WorkerInfo
     {
@@ -198,7 +199,7 @@ private:
     // 所有 depth 切换全部由 try_switch_depth 完成
     bool try_switch_depth(const uint32_t worker_id, const uint32_t depth)
     {
-        const uint32_t max_process_task = (depth + 1 == INVALID_DEPTH) ? MAX_PROCESS_TASKS / 2 : MAX_PROCESS_TASKS;
+        const uint32_t max_process_task = (depth + 1 == INVALID_DEPTH) ? MAX_PROCESS_TASKS / LAST_DEPTH_DENOMINATOR : MAX_PROCESS_TASKS;
         uint32_t processed = process_batch_at_depth(depth, max_process_task / self_schedule_denominator);
         const uint32_t cur_denominator = self_schedule_denominator;
         self_schedule_denominator = 1;
@@ -208,7 +209,7 @@ private:
         {
             if (self_schedule_depth != INVALID_DEPTH)
             {
-                self_schedule_denominator = (self_schedule_depth == new_depth) ? 2 : 1;
+                self_schedule_denominator = (self_schedule_depth == new_depth) ? 4 : 1;
                 self_schedule_depth = INVALID_DEPTH;
             }
             worker_infos[worker_id].depth.store(new_depth, std::memory_order_release);
@@ -405,7 +406,7 @@ private:
                 raw = static_cast<double>(qsize + hidden_size[d]) / (worker_snapshot[d] + 1.0) / MAX_PROCESS_TASKS;
             }
             else {
-                raw = static_cast<double>(qsize + hidden_size[d]) / (worker_snapshot[d] + 1.0) / MAX_PROCESS_TASKS * 2.0;
+                raw = static_cast<double>(qsize + hidden_size[d]) / (worker_snapshot[d] + 1.0) / MAX_PROCESS_TASKS * LAST_DEPTH_DENOMINATOR;
             }
             double log_raw = std::log2(raw + 1.0);
             depth_ema_pressure_[d] = PRESSURE_EMA_ALPHA * log_raw + (1.0 - PRESSURE_EMA_ALPHA) * depth_ema_pressure_[d];

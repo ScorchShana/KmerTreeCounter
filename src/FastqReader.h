@@ -386,7 +386,18 @@ public:
         classify_files(filenames);
         sort_files_by_size();
 
-        reader_count_ = (gz_files_.size() >= 2) ? 2 : 1;
+        if (gz_files_.size() >= 3)
+        {
+            reader_count_ = 2;
+        }
+        else if (gz_files_.size() == 2)
+        {
+            reader_count_ = 2;
+        }
+        else
+        {
+            reader_count_ = 1;
+        }
         threads_.reserve(reader_count_);
     }
 
@@ -688,7 +699,7 @@ private:
             }
 
             // if (is_gz) gzip_streamer.close();
-            if(is_gz) gzclose(gzfile);
+            if (is_gz) gzclose(gzfile);
             else ::close(fd);
 
             std::cout << "FastqReader: completed " << file << std::endl;

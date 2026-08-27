@@ -435,13 +435,15 @@ public:
         return thread_local_task_stack.size();
     }
 
-    void deal_with_local_stack()
+    void deal_with_local_stack(std::size_t max_task = 64)
     {
-        while (!thread_local_task_stack.empty())
+        std::size_t processed_tasks = 0;
+        while (!thread_local_task_stack.empty() && processed_tasks < max_task)
         {
             Task<N> task = thread_local_task_stack.back();
             thread_local_task_stack.pop_back();
             thread_add_kmer(task);
+            processed_tasks++;
         }
     }
 
@@ -1408,7 +1410,7 @@ private:
                     __builtin_prefetch(node_ptr->next, 0, 0);
                 }
                 append_export_record(writer, node_ptr->k_mer,
-                    std::min(count_max,node_ptr->count.load(std::memory_order_relaxed)));
+                    std::min(count_max, node_ptr->count.load(std::memory_order_relaxed)));
 
                 node_ptr = node_ptr->next;
             }
