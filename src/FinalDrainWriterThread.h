@@ -17,8 +17,8 @@
 
 class FinalDrainWriterThread
 {
-    static constexpr uint64_t AIO_BUFFER_SIZE = 512 * 1024;
-    static constexpr uint32_t NUM_AIO_BUFFERS = 4;
+    static constexpr uint64_t AIO_BUFFER_SIZE = 2 * 1024 * 1024;
+    static constexpr uint32_t NUM_AIO_BUFFERS = 2;
     // static constexpr uint64_t AIO_BUFFER_SIZE = 1ULL * 1024 * 1024;
 
     RingMemoryPool<FINAL_DRAIN_RING_POOL_CAPACITY> pool_;
