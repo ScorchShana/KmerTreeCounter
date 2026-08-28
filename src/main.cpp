@@ -578,7 +578,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    if (kmer_concurrent_hash_map_capacity <= 1 || kmer_concurrent_hash_map_capacity >= 16ULL * 1024 * 1024 || filter_max < filter_min || count_max == 0)
+    if (kmer_concurrent_hash_map_capacity <= 1 || filter_max < filter_min || count_max == 0)
     {
         std::cerr << "Usage: " << argv[0]
             << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [filter_min] [filter_max] [count_max]" << std::endl;

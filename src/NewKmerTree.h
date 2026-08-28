@@ -103,6 +103,7 @@ class KmerTree
     // 并发哈希表提前分配的spare block
     static inline thread_local char* cur_map_block = nullptr;
     static inline thread_local uint64_t cur_map_slot_count = 0;
+    static inline thread_local SpinBackoff<> thread_local_spin_backoff;
 
 public:
     // 根节点数组，2^(2 * ROOT_BASES) 个，每个对应一种短前缀
@@ -268,25 +269,11 @@ public:
                                 target_root->active_block = active_block;
                                 target_root->kmer_blocks[target_root->count++] = target_root->active_block;
 
-                                int backoff = 1;
-                                int spin_time = 0;
+                                thread_local_spin_backoff.reset();
 
                                 while (target_root->writer_count.load(std::memory_order_acquire) > 1)
                                 {
-                                    for (int i = 0; i < backoff; i++)
-                                    {
-                                        cpu_relax();
-                                    }
-
-                                    backoff = std::min(backoff * 2, WRITER_WAITING_MAX_BACKOFF);
-                                    spin_time++;
-
-                                    if (spin_time >= WRITER_WAITING_SPIN_TIME)
-                                    {
-                                        std::this_thread::yield();
-                                        spin_time = 0;
-                                        backoff = 1;
-                                    }
+                                    thread_local_spin_backoff.backoff();
                                 }
                             }
                             else
@@ -1045,25 +1032,11 @@ private:
 
                         need_spare = true;
 
-                        int backoff = 1;
-                        int spin_time = 0;
+                        thread_local_spin_backoff.reset();
 
                         while (child_node->writer_count.load(std::memory_order_acquire) > 1)
                         {
-                            for (int i = 0; i < backoff; i++)
-                            {
-                                cpu_relax();
-                            }
-
-                            backoff = std::min(backoff * 2, WRITER_WAITING_MAX_BACKOFF);
-                            spin_time++;
-
-                            if (spin_time >= WRITER_WAITING_SPIN_TIME)
-                            {
-                                std::this_thread::yield();
-                                spin_time = 0;
-                                backoff = 1;
-                            }
+                            thread_local_spin_backoff.backoff();
                         }
                     }
                     else
@@ -1097,6 +1070,7 @@ private:
                 // 正常入队到下一层队列
                 auto queue_ptr = layer_queue_->get_queue(current_depth + 1);
                 uint32_t retry_count = 0;
+                thread_local_spin_backoff.reset();
                 layer_queue_->increase_size();
                 while (!queue_ptr->try_enqueue(task))
                 {
@@ -1108,7 +1082,7 @@ private:
                         layer_queue_->decrease_size();
                         break;
                     }
-                    cpu_relax();
+                    thread_local_spin_backoff.backoff();
                 }
             }
 
@@ -1176,16 +1150,22 @@ private:
             else
             {
                 // CAS 失败，说明别人正在创建，自旋等待
+                thread_local_spin_backoff.reset();
                 while (parent->children_ptr.load(std::memory_order_relaxed) == CONSTRUCTING)
-                    cpu_relax();
+                {
+                    thread_local_spin_backoff.backoff();
+                }
                 child_slab = parent->children_ptr.load(std::memory_order_acquire);
             }
         }
         else if (child_slab == CONSTRUCTING)
         {
             // 正在创建中，自旋等待
+            thread_local_spin_backoff.reset();
             while (parent->children_ptr.load(std::memory_order_relaxed) == CONSTRUCTING)
-                cpu_relax();
+            {
+                thread_local_spin_backoff.backoff();
+            }
             child_slab = parent->children_ptr.load(std::memory_order_acquire);
         }
 
@@ -1228,7 +1208,7 @@ private:
     {
         ConcurrentMap<N>* CONSTRUCTING = reinterpret_cast<ConcurrentMap<N>*>(MAGIC_POINTER);
 
-        static constexpr int BACKOFF_LIMIT = 16;
+        static constexpr int BACKOFF_LIMIT = 32;
         static constexpr int RETRY_LIMIT = 32;
 
         int backoff_count = 1;

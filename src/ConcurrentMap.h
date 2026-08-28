@@ -140,10 +140,12 @@ public:
     // 哈希：将 k-mer 映射到桶索引
     static uint64_t hash_func(const kmer<N>& k_mer)
     {
-        const uint64_t h1 = komihash(&k_mer, sizeof(kmer<N>), 0);
-        const uint64_t h2 = rapidhash(&k_mer, sizeof(kmer<N>));
-        const uint64_t res = mix_hash(h1, h2);
-        return res;
+        // const uint64_t h1 = komihash(&k_mer, sizeof(kmer<N>), 0);
+        // const uint64_t h2 = rapidhash(&k_mer, sizeof(kmer<N>));
+        // const uint64_t res = mix_hash(h1, h2);
+        // return res;
+        const uint64_t h = rapidhash(&k_mer, sizeof(kmer<N>));
+        return h;
     }
 
     static void export_thread_node_count(FinalDrainWriter<N>& writer, const int goal_thread_id)
