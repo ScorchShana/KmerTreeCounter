@@ -250,6 +250,11 @@ int process_main()
         if (f.size() >= 3 && f.compare(f.size() - 3, 3, ".gz") == 0) gz_count++;
     }
     const uint32_t reader_num = (gz_count >= 2) ? 2 : 1;
+    
+    const uint32_t preReadThreadsNum = std::max(1U, n_thread / 8);
+    const uint32_t pre_reader_num = std::min(gz_count, preReadThreadsNum);
+    const uint32_t pre_parser_num = pre_reader_num * 4;
+    const uint32_t pre_counter_num = pre_reader_num * 3;
 
     const uint32_t remaining = n_thread - reader_num - 1;  // -1: export writer
     const uint32_t parser_num = std::max(1U, remaining / 8);
@@ -260,9 +265,9 @@ int process_main()
     // 初始化层级队列，用于在树的不同深度间传递任务
     auto layer_queues = std::make_shared<LayerQueues<N>>();
     // 初始化解析器环形内存池，管理 Reader 读取后的碱基字符串数据块
-    auto reader_parser_ring_pool = std::make_shared<RingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY>>(READER_PARSER_RING_MEMORY_POOL_BLOCK_SIZE, 1);
+    auto reader_parser_ring_pool = std::make_shared<RingMemoryPool<READER_PARSER_RING_MEMORY_POOL_CAPACITY>>(READER_PARSER_RING_MEMORY_POOL_BLOCK_SIZE, pre_reader_num);
     // 初始化分类器环形内存池，管理 Parser 线程处理后的 k-mer 数据块
-    auto parser_classifier_ring_pool = std::make_shared<RingMemoryPool<PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY>>(PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE, 1);
+    auto parser_classifier_ring_pool = std::make_shared<RingMemoryPool<PARSER_CLASSIFIER_RING_MEMORY_POOL_CAPACITY>>(PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE, pre_parser_num);
     // 初始化导出用的环形内存池，管理低频 k-mer 的导出数据块
     auto export_ring_pool = std::make_shared<RingMemoryPool<EXPORT_RING_MEMORY_POOL_CAPACITY>>(EXPORT_RING_MEMORY_POOL_BLOCK_SIZE, 1);
     // 初始化全局并发内存池，用于节点分配、哈希表等
@@ -270,14 +275,35 @@ int process_main()
     //
     auto global_classifier_task_queue = std::make_shared<MPMCRingQueue<content_type, GLOBAL_CLASSIFIER_TASK_QUEUE_CAPACITY>>();
 
-    // PreRead阶段
-    FastqPreReader<N> pre_reader(filenames, k_len, FASTQ_FILE_CHUNK_SIZE, reader_parser_ring_pool.get());
-    estimated_file_size = pre_reader.get_estimated_raw_fastq_file_size();
-    auto pre_parser_thread = std::thread([&]
-        {
-            FastqPreParser<N> parser(k_len, reader_parser_ring_pool.get(), parser_classifier_ring_pool.get());
-            parser.parse_and_push();
-            parser_classifier_ring_pool->producer_set_finished(); });
+    // PreRead阶段：多个 reader 按文件分组并行读取
+    std::vector<std::vector<std::string>> pre_reader_files(pre_reader_num);
+    for (size_t i = 0; i < filenames.size(); ++i)
+        pre_reader_files[i % pre_reader_num].push_back(filenames[i]);
+
+    std::vector<std::unique_ptr<FastqPreReader<N>>> pre_readers;
+    pre_readers.reserve(pre_reader_num);
+    for (uint32_t i = 0; i < pre_reader_num; ++i)
+        pre_readers.emplace_back(std::make_unique<FastqPreReader<N>>(pre_reader_files[i], k_len, FASTQ_FILE_CHUNK_SIZE, reader_parser_ring_pool.get()));
+
+    estimated_file_size = 0;
+    for (auto& pr : pre_readers)
+        estimated_file_size += pr->get_estimated_raw_fastq_file_size();
+
+    std::vector<std::thread> pre_reader_threads;
+    pre_reader_threads.reserve(pre_reader_num);
+    for (auto& pr : pre_readers)
+        pre_reader_threads.emplace_back([&pr] { pr->pre_read(); });
+
+    std::vector<std::thread> pre_parser_threads;
+    pre_parser_threads.reserve(pre_parser_num);
+    for (uint32_t i = 0; i < pre_parser_num; ++i)
+    {
+        pre_parser_threads.emplace_back([&]
+            {
+                FastqPreParser<N> parser(k_len, reader_parser_ring_pool.get(), parser_classifier_ring_pool.get());
+                parser.parse_and_push();
+                parser_classifier_ring_pool->producer_set_finished(); });
+    }
 
     std::vector<std::atomic<uint32_t>> prefix_counts(1U << (2 * ROOT_BASES)); // 256 个前缀的计数器
     for (auto& v : prefix_counts)
@@ -285,8 +311,8 @@ int process_main()
         v.store(0); // 或 v.store(init_value);
     }
     std::vector<std::thread> prefix_counter_threads;
-    uint32_t prefix_counter_thread_num = std::min(std::max(1u, n_thread - 2), 8u); // 预留至少 1 个线程给前缀计数器
-    for (uint32_t i = 0; i < prefix_counter_thread_num; ++i)
+    prefix_counter_threads.reserve(pre_counter_num);
+    for (uint32_t i = 0; i < pre_counter_num; ++i)
     {
         prefix_counter_threads.emplace_back([&]
             {
@@ -297,8 +323,26 @@ int process_main()
                     prefix_counts[j].fetch_add(prefix_counter.prefix_counts[j], std::memory_order_relaxed);
                 } });
     }
-    pre_reader.pre_read();
-    pre_parser_thread.join();
+
+    for (auto& t : pre_reader_threads)
+    {
+        t.join();
+    }
+
+    // 聚合各 reader 的质量值，得到全局 avgQuality
+    uint64_t quality_sum = 0, quality_count = 0;
+    for (auto& pr : pre_readers)
+    {
+        quality_sum += pr->get_quality_sum();
+        quality_count += pr->get_quality_count();
+    }
+    if (quality_count > 0)
+        avgQuality = static_cast<uint8_t>(quality_sum / quality_count);
+
+    for (auto& t : pre_parser_threads)
+    {
+        t.join();
+    }
     for (auto& t : prefix_counter_threads)
     {
         t.join();

@@ -124,7 +124,6 @@ public:
             left_buffer_size_ = 0;
         }
 
-        if (quality_count_ > 0) avgQuality = static_cast<uint8_t>(quality_sum_ / quality_count_);
         ring_memory_pool_ptr_->producer_set_finished();
     }
 
@@ -147,6 +146,9 @@ public:
         }
         return (total > 0) ? total : 1;
     }
+
+    uint64_t get_quality_sum() const noexcept { return quality_sum_; }
+    uint64_t get_quality_count() const noexcept { return quality_count_; }
 
 private:
     void open_current_file()
