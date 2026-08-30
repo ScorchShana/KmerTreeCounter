@@ -69,6 +69,7 @@ public:
     bool not_first_flag = false;
     uint64_t total_kmers_exported = 0;
     uint64_t total_kmers_send_to_tree = 0;
+    uint64_t classifier_wait_cycles = 0;
 #endif
 
     explicit FastqClassifier(uint32_t in_k_len,
@@ -278,6 +279,10 @@ public:
         export_kmer_block_count = 0;
 
         tree->flush_local_root_nodes(local_root_nodes.data(), rng());
+
+#ifdef TEST_MODE
+        classifier_wait_cycles = tree->classifier_wait_cycles;
+#endif
     }
 
 private:

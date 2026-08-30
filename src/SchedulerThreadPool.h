@@ -8,6 +8,7 @@
 #include "../src/SpinBackoff.h"
 #include "ConcurrentMap.h"
 #include "FinalDrainWriterThread.h"
+#include "SplitMix.h"
 
 #include <memory>
 #include <vector>
@@ -27,8 +28,12 @@ class SchedulerThreadPool final
     // Worker thread constants
     static constexpr uint32_t INVALID_DEPTH = MAX_DEPTH;
     static constexpr uint32_t DRAIN_EMPTY_CONFIRM_ROUNDS = 3;
-    static constexpr uint32_t MAX_PROCESS_TASKS = 128;
-    static constexpr uint32_t FORCE_DEAL_WITH_LOCAL_STACK_ROUND = 32;
+    static constexpr uint32_t MAX_PROCESS_TASKS = 16;
+    static constexpr uint32_t PROCESS_TASKS_PER_DEPTH = 16;
+    // static constexpr uint32_t FORCE_DEAL_WITH_LOCAL_STACK_ROUND = 32;
+    static constexpr uint32_t MAX_PROCESS_LOCAL_STACK_TASKS = 16;
+    static constexpr std::size_t LOCAL_STACK_WATERMARK = MAX_PROCESS_LOCAL_STACK_TASKS * 2;
+    static constexpr std::size_t LOCAL_STACK_CRITICAL_WATERMARK = 128;
     static constexpr uint32_t LAST_DEPTH_DENOMINATOR = 2;
     // Scheduler algorithm constants
     static constexpr uint32_t SCHEDULE_INTERVAL_NS = 500;
@@ -64,9 +69,26 @@ class SchedulerThreadPool final
     std::barrier<> drain_root_done_barrier_;
     FinalDrainWriterThread drain_writer_thread_;
 
-    inline static thread_local SpinBackoff<> backoff;
-    inline static thread_local uint32_t self_schedule_depth = INVALID_DEPTH;
-    inline static thread_local uint32_t self_schedule_denominator = 1;
+    inline static thread_local SpinBackoff<64, 128, 128 + 16, 16> backoff;
+    inline static thread_local SplitMix64 rng;
+    // inline static thread_local uint32_t self_schedule_depth = INVALID_DEPTH;
+    // inline static thread_local uint32_t self_schedule_denominator = 1;
+
+#ifdef TEST_MODE
+    inline static thread_local uint64_t backoff_time_with_tasks{ 0 };
+    inline static thread_local uint64_t steal_tasks{ 0 };
+    inline static thread_local uint64_t home_tasks{ 0 };
+    inline static thread_local uint64_t local_stack_tasks{ 0 };
+    inline static thread_local std::array<uint64_t, MAX_DEPTH> depth_steal_tasks{};
+    inline static thread_local std::array<uint64_t, MAX_DEPTH> depth_home_tasks{};
+    std::atomic<uint64_t> total_request_sleep_time{ 0 };
+    std::atomic<uint64_t> total_backoff_time_with_tasks{ 0 };
+    std::atomic<uint64_t> total_steal_tasks{ 0 };
+    std::atomic<uint64_t> total_home_tasks{ 0 };
+    std::atomic<uint64_t> total_local_stack_tasks{ 0 };
+    std::array<std::atomic<uint64_t>, MAX_DEPTH> total_depth_steal_tasks{};
+    std::array<std::atomic<uint64_t>, MAX_DEPTH> total_depth_home_tasks{};
+#endif
 
 public:
 
@@ -92,7 +114,22 @@ public:
 
     ~SchedulerThreadPool()
     {
+#ifdef TEST_MODE
+        std::cout << "SchedulerThreadPool Request Sleep : " << total_request_sleep_time.load() << std::endl;
+        std::cout << "SchedulerThreadPool Backoff Time With Tasks : " << total_backoff_time_with_tasks.load() << std::endl;
+        std::cout << "SchedulerThreadPool Steal Tasks : " << total_steal_tasks.load() << std::endl;
+        std::cout << "SchedulerThreadPool Home Tasks : " << total_home_tasks.load() << std::endl;
+        std::cout << "SchedulerThreadPool Local Stack Tasks : " << total_local_stack_tasks.load() << std::endl;
+        for (uint32_t d = 0; d < MAX_DEPTH; ++d)
+        {
+            std::cout << "SchedulerThreadPool Depth " << d << " Home Tasks : " << total_depth_home_tasks[d].load() << std::endl;
+        }
+        for (uint32_t d = 0; d < MAX_DEPTH; ++d)
+        {
+            std::cout << "SchedulerThreadPool Depth " << d << " Steal Tasks : " << total_depth_steal_tasks[d].load() << std::endl;
+        }
 
+#endif
     }
 
     void start()
@@ -182,7 +219,7 @@ private:
         }
     }
 
-    uint32_t process_batch_at_depth(const uint32_t depth, const uint32_t max_process_tasks = MAX_PROCESS_TASKS)
+    uint32_t process_batch_at_depth(const uint32_t depth, const uint32_t max_process_tasks = PROCESS_TASKS_PER_DEPTH)
     {
         Task<N> task;
         auto queue = layer_queues_ptr_->get_queue(depth);
@@ -193,91 +230,133 @@ private:
             layer_queues_ptr_->decrease_size();
             processed++;
         }
+
+#ifdef TEST_MODE
+        home_tasks += processed;
+        depth_home_tasks[depth] += processed;
+#endif
+
         return processed;
     }
 
-    // 所有 depth 切换全部由 try_switch_depth 完成
-    bool try_switch_depth(const uint32_t worker_id, const uint32_t depth)
+    bool try_steal()
     {
-        const uint32_t max_process_task = (depth + 1 == INVALID_DEPTH) ? MAX_PROCESS_TASKS / LAST_DEPTH_DENOMINATOR : MAX_PROCESS_TASKS;
-        uint32_t processed = process_batch_at_depth(depth, max_process_task / self_schedule_denominator);
-        const uint32_t cur_denominator = self_schedule_denominator;
-        self_schedule_denominator = 1;
-
-        uint32_t new_depth = worker_commands_[worker_id].exchange(INVALID_DEPTH, std::memory_order_acq_rel);
-        if (new_depth != INVALID_DEPTH)
+        for (int steal_depth = MAX_DEPTH - 1; steal_depth >= 0; --steal_depth)
         {
-            if (self_schedule_depth != INVALID_DEPTH)
+            auto queue = layer_queues_ptr_->get_queue(steal_depth);
+            Task<N> task;
+            if (queue->try_dequeue(task))
             {
-                self_schedule_denominator = (self_schedule_depth == new_depth) ? 4 : 1;
-                self_schedule_depth = INVALID_DEPTH;
+                tree_ptr_->thread_add_kmer(task);
+                layer_queues_ptr_->decrease_size();
+
+#ifdef TEST_MODE
+                ++steal_tasks;
+                ++depth_steal_tasks[steal_depth];
+#endif
+
+                return true;
             }
+        }
+        return false;
+    }
+
+    // 所有 depth 切换全部由 try_switch_depth 完成
+    uint32_t try_switch_depth(const uint32_t worker_id)
+    {
+        const uint32_t last_depth = worker_infos[worker_id].depth.load(std::memory_order_acquire);
+        const uint32_t new_depth = worker_commands_[worker_id].exchange(INVALID_DEPTH, std::memory_order_acq_rel);
+        const uint32_t res_depth = (new_depth != INVALID_DEPTH) ? new_depth : last_depth;
+        if (res_depth != last_depth)
+        {
             worker_infos[worker_id].depth.store(new_depth, std::memory_order_release);
-            depth_worker_count[depth].fetch_sub(1, std::memory_order_release);
+            depth_worker_count[last_depth].fetch_sub(1, std::memory_order_release);
             depth_worker_count[new_depth].fetch_add(1, std::memory_order_release);
+            backoff.reset();
+        }
+        return res_depth;
+    }
+
+    bool ensure_local_stack_within_watermark(const uint32_t worker_id)
+    {
+        size_t local_size = tree_ptr_->get_local_stack_size();
+
+        // 1. 内存保护模式
+        if (local_size >= LOCAL_STACK_CRITICAL_WATERMARK)
+        {
+            do
+            {
+                uint64_t local_processed = tree_ptr_->deal_with_local_stack(MAX_PROCESS_LOCAL_STACK_TASKS);
+
+#ifdef TEST_MODE
+                local_stack_tasks += local_processed;
+#endif
+
+            } while (tree_ptr_->get_local_stack_size() > LOCAL_STACK_WATERMARK);
+
             backoff.reset();
             return true;
         }
-        else
+        else if (local_size >= LOCAL_STACK_WATERMARK)
         {
-            if (processed == MAX_PROCESS_TASKS / cur_denominator)
-            {
-                backoff.double_decay();
-            }
-            else if (processed)
-            {
-                backoff.decay();
-            }
-            else if (tree_ptr_->get_local_stack_size() > 0)
-            {
-                tree_ptr_->deal_with_local_stack();
-                backoff.decay();
-            }
-            else if (depth_worker_count[depth].load(std::memory_order_relaxed) > 1)
-            {
-                for (uint32_t d = 0; d < MAX_DEPTH; ++d)
-                {
-                    if (d == depth) continue;
-                    uint32_t qsize = layer_queues_ptr_->get_queue(d)->size();
-                    const int depth_worker_num = depth_worker_count[d].load(std::memory_order_relaxed);
-                    // const int hard_worker_upper_bound = std::max<int>(1, (thread_count_ - 1) * 3 / 4);
-                    // if (depth_worker_num >= hard_worker_upper_bound) continue;
-                    // double raw = static_cast<double>(qsize) / (depth_worker_num + 1.0);
-                    // double depth_ema_pressure = std::log2(raw + 1.0);
-                    // if (depth_ema_pressure > SELF_SCHEDULE_LOG_DELTA)
-                    // {
-                    //     worker_commands_[worker_id].store(d, std::memory_order_release);
-                    //     self_schedule_depth = d;
-                    //     return false;
-                    // }
-                    if (d + 1 < MAX_DEPTH && qsize > 0.3 * depth_worker_num * MAX_PROCESS_TASKS)
-                    {
-                        worker_commands_[worker_id].store(d, std::memory_order_release);
-                        self_schedule_depth = d;
-                        return false;
-                    }
-                    else if (d + 1 == MAX_DEPTH && qsize > 0.3 * depth_worker_num * MAX_PROCESS_TASKS / 2)
-                    {
-                        worker_commands_[worker_id].store(d, std::memory_order_release);
-                        self_schedule_depth = d;
-                        return false;
-                    }
-                }
-                backoff.backoff();
-            }
-            else
-            {
-                backoff.decay();
-            }
+            uint64_t local_processed = tree_ptr_->deal_with_local_stack(MAX_PROCESS_LOCAL_STACK_TASKS);
 
-            return false;
+#ifdef TEST_MODE
+            local_stack_tasks += local_processed;
+#endif
+
+            return true;
         }
+        return false;
     }
 
     void try_work(const uint32_t worker_id)
     {
-        uint32_t work_depth = worker_infos[worker_id].depth.load(std::memory_order_acquire);
-        try_switch_depth(worker_id, work_depth);
+        if (ensure_local_stack_within_watermark(worker_id))
+        {
+            return;
+        }
+
+        const uint32_t depth = try_switch_depth(worker_id);
+
+        const uint32_t max_process_tasks = (depth + 1 == INVALID_DEPTH) ? PROCESS_TASKS_PER_DEPTH / LAST_DEPTH_DENOMINATOR : PROCESS_TASKS_PER_DEPTH;
+        uint32_t processed = process_batch_at_depth(depth, max_process_tasks);
+
+        if (processed == max_process_tasks)
+        {
+            backoff.double_decay();
+        }
+        else if (processed)
+        {
+            backoff.decay();
+        }
+        else if (tree_ptr_->get_local_stack_size() > 0)
+        {
+            uint64_t local_processed = tree_ptr_->deal_with_local_stack(MAX_PROCESS_LOCAL_STACK_TASKS);
+
+#ifdef TEST_MODE
+            local_stack_tasks += local_processed;
+#endif
+
+            backoff.decay();
+        }
+        else if (depth_worker_count[depth].load(std::memory_order_relaxed) > 1)
+        {
+            if (!try_steal())
+            {
+#ifdef TEST_MODE
+                if (layer_queues_ptr_->size() > 0) {
+                    ++backoff_time_with_tasks;
+                }
+#endif
+
+                backoff.backoff();
+            }
+        }
+        else
+        {
+            backoff.decay();
+        }
     }
 
     void worker_init(const uint32_t worker_id, const uint32_t depth)
@@ -297,18 +376,32 @@ private:
         {
             try_work(worker_id);
             loop_round++;
-            if ((loop_round & 0x7) == 0)
-            {
-                worker_infos[worker_id].local_stack_size.store(
-                    static_cast<uint32_t>(tree_ptr_->get_local_stack_size()),
-                    std::memory_order_release);
-            }
-            if (loop_round >= FORCE_DEAL_WITH_LOCAL_STACK_ROUND)
-            {
-                tree_ptr_->check_and_deal_with_local_stack();
-                loop_round = 0;
-            }
+            // if ((loop_round & 0x7) == 0)
+            // {
+            //     worker_infos[worker_id].local_stack_size.store(
+            //         static_cast<uint32_t>(tree_ptr_->get_local_stack_size()),
+            //         std::memory_order_release);
+            // }
+            // if (loop_round >= FORCE_DEAL_WITH_LOCAL_STACK_ROUND)
+            // {
+            //     tree_ptr_->deal_with_local_stack(FORCE_DEAL_WITH_LOCAL_STACK_ROUND);
+            //     loop_round = 0;
+            // }
         }
+
+#ifdef TEST_MODE
+        total_request_sleep_time.fetch_add(backoff.get_request_sleep_time(), std::memory_order_relaxed);
+        total_backoff_time_with_tasks.fetch_add(backoff_time_with_tasks, std::memory_order_relaxed);
+        total_steal_tasks.fetch_add(steal_tasks, std::memory_order_relaxed);
+        total_home_tasks.fetch_add(home_tasks, std::memory_order_relaxed);
+        total_local_stack_tasks.fetch_add(local_stack_tasks, std::memory_order_relaxed);
+        for (uint32_t d = 0; d < MAX_DEPTH; ++d)
+        {
+            total_depth_steal_tasks[d].fetch_add(depth_steal_tasks[d], std::memory_order_relaxed);
+            total_depth_home_tasks[d].fetch_add(depth_home_tasks[d], std::memory_order_relaxed);
+        }
+#endif
+
         const uint32_t total_workers = thread_count_ - 1;
 
         if (worker_id == 0) [[unlikely]]

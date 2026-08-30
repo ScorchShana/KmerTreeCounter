@@ -3,7 +3,7 @@
 
 #define TEST_MODE
 
-#include "SpinLock.h"
+// #include "SpinLock.h"
 
 #include <cstdint>
 #include <cstddef>
@@ -23,6 +23,37 @@
 #define HAS_LIBNUMA 1
 #else
 #define HAS_LIBNUMA 0
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <emmintrin.h>
+static inline void cpu_relax() noexcept
+{
+    _mm_pause();
+}
+#elif defined(__arm__) || defined(__aarch64__) || defined(_M_ARM64)
+static inline void cpu_relax() noexcept
+{
+#if (defined(__ARM_ARCH_6K__) ||  \
+     defined(__ARM_ARCH_6Z__) ||  \
+     defined(__ARM_ARCH_6ZK__) || \
+     defined(__ARM_ARCH_6T2__) || \
+     defined(__ARM_ARCH_7__) ||   \
+     defined(__ARM_ARCH_7A__) ||  \
+     defined(__ARM_ARCH_7R__) ||  \
+     defined(__ARM_ARCH_7M__) ||  \
+     defined(__ARM_ARCH_7S__) ||  \
+     defined(__ARM_ARCH_8A__) ||  \
+     defined(__aarch64__))
+    asm volatile("yield" ::: "memory");
+
+#elif defined(_M_ARM64)
+    __yield();
+
+#else
+    asm volatile("nop" ::: "memory");
+#endif
+}
 #endif
 
 constexpr uint64_t PAGE_SIZE = 4096;
@@ -83,8 +114,6 @@ constexpr uint64_t KMER_BIN_SIZE = 2048;
 // MPMP环状队列配置常量
 constexpr uint32_t TASK_QUEUE_CAPACITY = 16U * 1024;
 
-// task线程enqueue尝试次数
-constexpr uint32_t TASK_ENQUEUE_RETRY_LIMIT = 1ULL << 7;
 
 // Final drain 导出配置
 constexpr uint64_t DRAIN_EXPORT_BUFFER_SIZE = 2 * 1024 * 1024; // final drain 导出缓冲区大小（字节）
