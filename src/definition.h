@@ -114,8 +114,6 @@ constexpr uint64_t KMER_BIN_SIZE = 2048;
 // MPMP环状队列配置常量
 constexpr uint32_t TASK_QUEUE_CAPACITY = 16U * 1024;
 
-// task线程enqueue尝试次数
-constexpr uint32_t TASK_ENQUEUE_RETRY_LIMIT = 1ULL << 7;
 
 // Final drain 导出配置
 constexpr uint64_t DRAIN_EXPORT_BUFFER_SIZE = 2 * 1024 * 1024; // final drain 导出缓冲区大小（字节）
