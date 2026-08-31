@@ -42,6 +42,7 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 target_link_libraries(${PROJECT_NAME} zlib)
 target_link_libraries(${PROJECT_NAME} rt)
 target_link_libraries(${PROJECT_NAME} pthread)
+target_link_libraries(${PROJECT_NAME} atomic)
 
 # 检查头文件
 check_include_file_cxx(numa.h HAVE_NUMA_H)

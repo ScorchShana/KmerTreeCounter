@@ -252,7 +252,7 @@ int process_main()
     const uint32_t reader_num = (gz_count >= 2) ? 2 : 1;
 
     const uint32_t remaining = n_thread - reader_num - 1;  // -1: export writer
-    const uint32_t parser_num = std::max(1U, remaining / 8);
+    const uint32_t parser_num = std::max(1U, remaining / 10);
     const uint32_t worker_budget = remaining - parser_num;
 
     const auto init_start = std::chrono::steady_clock::now();
@@ -321,7 +321,7 @@ int process_main()
     std::cout << "Average prefix count: " << average_count << std::endl;
 #endif
 
-    const uint32_t fewer_worker_num = std::max<uint32_t>(1U, worker_budget / (1.0 + TASK_CLASSIFIER_RATIO + 0.1));
+    const uint32_t fewer_worker_num = std::max<uint32_t>(1U, worker_budget / (1.0 + TASK_CLASSIFIER_RATIO + 0.8));
     const uint32_t more_worker_num = std::max<uint32_t>(1U, worker_budget - fewer_worker_num);
     const bool high_quailty = (avgQuality >= 33 + 30);
     const uint32_t classifier_num = high_quailty ? fewer_worker_num : more_worker_num;

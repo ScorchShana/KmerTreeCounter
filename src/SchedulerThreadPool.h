@@ -25,27 +25,46 @@
 template <uint32_t N>
 class SchedulerThreadPool final
 {
+
+    struct alignas(CACHE_LINE_SIZE) AlignedAtomicInt {
+        std::atomic<int> value{};
+    };
+
+    struct alignas(CACHE_LINE_SIZE) AlignedAtomicUint32 {
+        std::atomic<uint32_t> value{};
+    };
+
+    struct alignas(CACHE_LINE_SIZE) AlignedUint128 {
+        __uint128_t value{};
+    };
+
+
     // Worker thread constants
     static constexpr uint32_t INVALID_DEPTH = MAX_DEPTH;
     static constexpr uint32_t DRAIN_EMPTY_CONFIRM_ROUNDS = 3;
     static constexpr uint32_t MAX_PROCESS_TASKS = 16;
-    static constexpr uint32_t PROCESS_TASKS_PER_DEPTH = 16;
-    // static constexpr uint32_t FORCE_DEAL_WITH_LOCAL_STACK_ROUND = 32;
     static constexpr uint32_t MAX_PROCESS_LOCAL_STACK_TASKS = 16;
     static constexpr std::size_t LOCAL_STACK_WATERMARK = MAX_PROCESS_LOCAL_STACK_TASKS * 2;
     static constexpr std::size_t LOCAL_STACK_CRITICAL_WATERMARK = 128;
     static constexpr uint32_t LAST_DEPTH_DENOMINATOR = 2;
     // Scheduler algorithm constants
-    static constexpr uint32_t SCHEDULE_INTERVAL_NS = 500;
-    static constexpr double PRESSURE_EMA_ALPHA = 0.6;
-    static constexpr double HYSTERESIS_LOG_DELTA = std::log2(1.7);          // log2(1.7)
-    static constexpr uint32_t DRAIN_INTERVAL_NS = 250;
-    static constexpr double SELF_SCHEDULE_LOG_DELTA = std::log2(1.5); // log2(1.5)
+    static constexpr uint32_t SCHEDULE_INTERVAL_US = 50;
+    static constexpr double WORK_EMA_ALPHA = 0.3;
+    static constexpr uint32_t DRAIN_INTERVAL_US = 25;
 
-    struct WorkerInfo
+    struct alignas(CACHE_LINE_SIZE) WorkerInfo
     {
-        alignas(CACHE_LINE_SIZE) std::atomic<uint32_t> depth{ INVALID_DEPTH };
-        alignas(CACHE_LINE_SIZE) std::atomic<uint32_t> local_stack_size{ 0 };
+        std::atomic<uint32_t> depth{ INVALID_DEPTH };
+        std::atomic<std::size_t> local_stack_size{ 0 };
+        std::array<std::atomic<uint64_t>, MAX_DEPTH> depth_task_cycles{};
+        std::array<std::atomic<uint64_t>, MAX_DEPTH> depth_task_count;
+    };
+
+    struct WorkerSnapshot
+    {
+        uint32_t worker_id;
+        uint32_t depth;
+        std::size_t local_stack_size;
     };
 
     const uint32_t thread_count_;
@@ -59,11 +78,12 @@ class SchedulerThreadPool final
     std::thread scheduler_thread_;
     std::vector<std::unique_ptr<std::thread>> worker_threads_ptr_;
     std::vector<std::thread> extra_drain_threads_;
-    std::vector<alignas(CACHE_LINE_SIZE) std::atomic<uint32_t>> worker_commands_;
+    std::vector<AlignedAtomicUint32> worker_commands_;
 
-    std::array<std::atomic<int>, MAX_DEPTH> depth_worker_count{};
+    std::array<AlignedAtomicInt, MAX_DEPTH> depth_worker_count{};
     std::vector<WorkerInfo> worker_infos;
-    std::array<double, MAX_DEPTH> depth_ema_pressure_{};
+    std::array<double, MAX_DEPTH> depth_ema_work{};
+    std::vector<uint32_t> movein_workers_id;
 
     std::barrier<> drain_all_done_barrier;
     std::barrier<> drain_root_done_barrier_;
@@ -71,8 +91,9 @@ class SchedulerThreadPool final
 
     inline static thread_local SpinBackoff<64, 128, 128 + 16, 16> backoff;
     inline static thread_local SplitMix64 rng;
-    // inline static thread_local uint32_t self_schedule_depth = INVALID_DEPTH;
-    // inline static thread_local uint32_t self_schedule_denominator = 1;
+
+    inline static thread_local std::array<uint64_t, MAX_DEPTH> local_depth_task_cycles{};
+    inline static thread_local std::array<uint64_t, MAX_DEPTH> local_depth_task_count{};
 
 #ifdef TEST_MODE
     inline static thread_local uint64_t backoff_time_with_tasks{ 0 };
@@ -88,6 +109,7 @@ class SchedulerThreadPool final
     std::atomic<uint64_t> total_local_stack_tasks{ 0 };
     std::array<std::atomic<uint64_t>, MAX_DEPTH> total_depth_steal_tasks{};
     std::array<std::atomic<uint64_t>, MAX_DEPTH> total_depth_home_tasks{};
+    std::vector<std::size_t> max_local_stack_size;
 #endif
 
 public:
@@ -108,8 +130,12 @@ public:
             thread_count_ - 1 + extra_drain_thread_count_)
     {
         for (auto& cmd : worker_commands_)
-            cmd.store(INVALID_DEPTH, std::memory_order_relaxed);
+            cmd.value.store(INVALID_DEPTH, std::memory_order_relaxed);
         worker_threads_ptr_.reserve(thread_count_ - 1);
+
+#ifdef TEST_MODE
+        max_local_stack_size.resize(thread_count_ - 1, 0);
+#endif
     }
 
     ~SchedulerThreadPool()
@@ -129,6 +155,13 @@ public:
             std::cout << "SchedulerThreadPool Depth " << d << " Steal Tasks : " << total_depth_steal_tasks[d].load() << std::endl;
         }
 
+        std::size_t max_local_stack_size_total = 0;
+        for (uint32_t w = 0; w < thread_count_ - 1; ++w)
+        {
+            max_local_stack_size_total = std::max(max_local_stack_size_total, max_local_stack_size[w]);
+        }
+        std::cout << "SchedulerThreadPool Max Local Stack Size : " << max_local_stack_size_total << std::endl;
+
 #endif
     }
 
@@ -141,7 +174,7 @@ public:
             worker_init(i, cur_depth);
             worker_threads_ptr_.push_back(std::make_unique<std::thread>(&SchedulerThreadPool::worker_thread_loop, this, i));
 
-            depth_worker_count[cur_depth].fetch_add(1, std::memory_order_release);
+            // depth_worker_count[cur_depth].value.fetch_add(1, std::memory_order_release);
 
             cur_depth++;
             cur_depth = cur_depth % MAX_DEPTH;
@@ -219,7 +252,8 @@ private:
         }
     }
 
-    uint32_t process_batch_at_depth(const uint32_t depth, const uint32_t max_process_tasks = PROCESS_TASKS_PER_DEPTH)
+    uint32_t process_batch_at_depth(const uint32_t depth,
+        const uint32_t max_process_tasks = MAX_PROCESS_TASKS)
     {
         Task<N> task;
         auto queue = layer_queues_ptr_->get_queue(depth);
@@ -265,13 +299,17 @@ private:
     uint32_t try_switch_depth(const uint32_t worker_id)
     {
         const uint32_t last_depth = worker_infos[worker_id].depth.load(std::memory_order_acquire);
-        const uint32_t new_depth = worker_commands_[worker_id].exchange(INVALID_DEPTH, std::memory_order_acq_rel);
+        const uint32_t command_depth_snapshot = worker_commands_[worker_id].value.load(std::memory_order_acquire);
+        if (command_depth_snapshot == INVALID_DEPTH || command_depth_snapshot == last_depth) [[likely]]
+        {
+            return last_depth;
+        }
+
+        const uint32_t new_depth = worker_commands_[worker_id].value.exchange(INVALID_DEPTH, std::memory_order_acq_rel);
         const uint32_t res_depth = (new_depth != INVALID_DEPTH) ? new_depth : last_depth;
         if (res_depth != last_depth)
         {
             worker_infos[worker_id].depth.store(new_depth, std::memory_order_release);
-            depth_worker_count[last_depth].fetch_sub(1, std::memory_order_release);
-            depth_worker_count[new_depth].fetch_add(1, std::memory_order_release);
             backoff.reset();
         }
         return res_depth;
@@ -284,6 +322,12 @@ private:
         // 1. 内存保护模式
         if (local_size >= LOCAL_STACK_CRITICAL_WATERMARK)
         {
+#ifdef TEST_MODE
+            const std::size_t max_size = local_size;
+            const std::size_t prev_max_size = max_local_stack_size[worker_id];
+            max_local_stack_size[worker_id] = std::max(max_size, prev_max_size);
+#endif
+
             do
             {
                 uint64_t local_processed = tree_ptr_->deal_with_local_stack(MAX_PROCESS_LOCAL_STACK_TASKS);
@@ -303,6 +347,9 @@ private:
 
 #ifdef TEST_MODE
             local_stack_tasks += local_processed;
+            const std::size_t max_size = local_size;
+            const std::size_t prev_max_size = max_local_stack_size[worker_id];
+            max_local_stack_size[worker_id] = std::max(max_size, prev_max_size);
 #endif
 
             return true;
@@ -314,21 +361,35 @@ private:
     {
         if (ensure_local_stack_within_watermark(worker_id))
         {
+            worker_infos[worker_id].local_stack_size.store(tree_ptr_->get_local_stack_size(), std::memory_order_relaxed);
             return;
         }
 
         const uint32_t depth = try_switch_depth(worker_id);
 
-        const uint32_t max_process_tasks = (depth + 1 == INVALID_DEPTH) ? PROCESS_TASKS_PER_DEPTH / LAST_DEPTH_DENOMINATOR : PROCESS_TASKS_PER_DEPTH;
+        const uint32_t max_process_tasks = (depth + 1 == INVALID_DEPTH) ? MAX_PROCESS_TASKS / LAST_DEPTH_DENOMINATOR : MAX_PROCESS_TASKS;
+
+        const uint64_t start_cycles = __rdtsc();
         uint32_t processed = process_batch_at_depth(depth, max_process_tasks);
+        const uint64_t end_cycles = __rdtsc();
 
         if (processed == max_process_tasks)
         {
             backoff.double_decay();
+            if (end_cycles > start_cycles)
+            {
+                local_depth_task_cycles[depth] += end_cycles - start_cycles;
+                local_depth_task_count[depth] += processed;
+            }
         }
         else if (processed)
         {
             backoff.decay();
+            if (end_cycles > start_cycles)
+            {
+                local_depth_task_cycles[depth] += end_cycles - start_cycles;
+                local_depth_task_count[depth] += processed;
+            }
         }
         else if (tree_ptr_->get_local_stack_size() > 0)
         {
@@ -340,18 +401,16 @@ private:
 
             backoff.decay();
         }
-        else if (depth_worker_count[depth].load(std::memory_order_relaxed) > 1)
+        else if (!try_steal())
         {
-            if (!try_steal())
-            {
+
 #ifdef TEST_MODE
-                if (layer_queues_ptr_->size() > 0) {
-                    ++backoff_time_with_tasks;
-                }
+            if (layer_queues_ptr_->size() > 0) {
+                ++backoff_time_with_tasks;
+            }
 #endif
 
-                backoff.backoff();
-            }
+            backoff.backoff();
         }
         else
         {
@@ -376,17 +435,17 @@ private:
         {
             try_work(worker_id);
             loop_round++;
-            // if ((loop_round & 0x7) == 0)
-            // {
-            //     worker_infos[worker_id].local_stack_size.store(
-            //         static_cast<uint32_t>(tree_ptr_->get_local_stack_size()),
-            //         std::memory_order_release);
-            // }
-            // if (loop_round >= FORCE_DEAL_WITH_LOCAL_STACK_ROUND)
-            // {
-            //     tree_ptr_->deal_with_local_stack(FORCE_DEAL_WITH_LOCAL_STACK_ROUND);
-            //     loop_round = 0;
-            // }
+            if ((loop_round & 63) == 0)
+            {
+                worker_infos[worker_id].local_stack_size.store(tree_ptr_->get_local_stack_size(),
+                    std::memory_order_relaxed);
+                for (uint32_t d = 0; d < MAX_DEPTH; ++d)
+                {
+                    worker_infos[worker_id].depth_task_cycles[d].store(local_depth_task_cycles[d], std::memory_order_relaxed);
+                    worker_infos[worker_id].depth_task_count[d].store(local_depth_task_count[d], std::memory_order_relaxed);
+                }
+            }
+
         }
 
 #ifdef TEST_MODE
@@ -471,196 +530,289 @@ private:
         }
     }
 
-    void get_depth_worker_count_snapshot(std::array<uint32_t, MAX_DEPTH>& depth_worker_count_snapshot)
+    void get_snapshot(std::array<uint32_t, MAX_DEPTH>& depth_worker_count_snapshot,
+        std::vector<WorkerSnapshot>& worker_snapshots,
+        std::array<uint64_t, MAX_DEPTH>& depth_new_cycles_snapshot,
+        std::array<uint64_t, MAX_DEPTH>& depth_new_taks_snapshot)
     {
-        for (uint32_t depth = 0; depth < MAX_DEPTH; ++depth)
-        {
-            depth_worker_count_snapshot[depth] = depth_worker_count[depth].load(std::memory_order_acquire);
-        }
-    }
+        // for (uint32_t depth = 0; depth < MAX_DEPTH; ++depth)
+        // {
+        //     depth_worker_count_snapshot[depth] = depth_worker_count[depth].load(std::memory_order_acquire);
+        // }
 
-    void compute_ema_pressure(const std::array<uint32_t, MAX_DEPTH>& worker_snapshot)
-    {
         const uint32_t total_workers = thread_count_ - 1;
-        std::array<uint32_t, MAX_DEPTH> hidden_size{};
+
+        depth_worker_count_snapshot.fill(0);
+        depth_new_cycles_snapshot.fill(0);
+        depth_new_taks_snapshot.fill(0);
+
         for (uint32_t w = 0; w < total_workers; ++w)
         {
-            uint32_t wd = worker_infos[w].depth.load(std::memory_order_acquire);
-            if (wd < MAX_DEPTH)
-                hidden_size[wd] +=
-                worker_infos[w].local_stack_size.load(std::memory_order_acquire);
-        }
+            worker_snapshots[w].worker_id = w;
+            worker_snapshots[w].depth = worker_infos[w].depth.load(std::memory_order_acquire);
+            worker_snapshots[w].local_stack_size = worker_infos[w].local_stack_size.load(std::memory_order_acquire);
+            for (uint32_t d = 0; d < MAX_DEPTH; ++d)
+            {
+                depth_new_cycles_snapshot[d] += worker_infos[w].depth_task_cycles[d].load(std::memory_order_acquire);
+                depth_new_taks_snapshot[d] += worker_infos[w].depth_task_count[d].load(std::memory_order_acquire);
+            }
 
-        for (uint32_t d = 0; d < MAX_DEPTH; ++d)
-        {
-            uint32_t qsize = layer_queues_ptr_->get_queue(d)->size();
-            double raw;
-            if (d + 1 < MAX_DEPTH) {
-                raw = static_cast<double>(qsize + hidden_size[d]) / (worker_snapshot[d] + 1.0) / MAX_PROCESS_TASKS;
+            if (worker_snapshots[w].depth < MAX_DEPTH)
+            {
+                ++depth_worker_count_snapshot[worker_snapshots[w].depth];
             }
-            else {
-                raw = static_cast<double>(qsize + hidden_size[d]) / (worker_snapshot[d] + 1.0) / MAX_PROCESS_TASKS * LAST_DEPTH_DENOMINATOR;
+            else
+            {
+                ++depth_worker_count_snapshot[MAX_DEPTH - 1];
             }
-            double log_raw = std::log2(raw + 1.0);
-            depth_ema_pressure_[d] = PRESSURE_EMA_ALPHA * log_raw + (1.0 - PRESSURE_EMA_ALPHA) * depth_ema_pressure_[d];
         }
     }
 
-    void update_dynamic_lower_bounds(
-        std::array<uint32_t, MAX_DEPTH>& lower_bound,
-        const uint32_t total_workers,
-        const uint32_t hard_upper_bound)
+    void get_depth_cycles_per_task(std::array<double, MAX_DEPTH>& depth_cycles_per_task,
+        std::array<uint64_t, MAX_DEPTH>& depth_new_cycles_snapshot,
+        std::array<uint64_t, MAX_DEPTH>& depth_new_taks_snapshot,
+        std::array<uint64_t, MAX_DEPTH>& depth_cycles_snapshot,
+        std::array<uint64_t, MAX_DEPTH>& depth_tasks_snapshot)
     {
-        double total_ema = 0.0;
-        for (uint32_t d = 0; d < MAX_DEPTH; ++d)
-            total_ema += depth_ema_pressure_[d];
 
-        if (total_workers <= MAX_DEPTH)
+        constexpr double CYCLES_PER_TASK_SMOOTHING_FACTOR = 0.6;
+
+        for (uint32_t depth = 0; depth < MAX_DEPTH; ++depth)
         {
-            lower_bound.fill(1);
-            return;
+            const uint64_t depth_cycles = depth_new_cycles_snapshot[depth];
+            const uint64_t depth_tasks = depth_new_taks_snapshot[depth];
+
+            const uint64_t delta_depth_cycles = depth_cycles - depth_cycles_snapshot[depth];
+            const uint64_t delta_depth_tasks = depth_tasks - depth_tasks_snapshot[depth];
+
+            depth_cycles_snapshot[depth] = depth_cycles;
+            depth_tasks_snapshot[depth] = depth_tasks;
+
+            if (delta_depth_tasks > 0 && delta_depth_cycles > 0)
+            {
+                const double new_cycles_per_task = static_cast<double>(delta_depth_cycles) / static_cast<double>(delta_depth_tasks);
+                if (depth_cycles_per_task[depth] <= 2) [[unlikely]]
+                {
+                    depth_cycles_per_task[depth] = new_cycles_per_task;
+                }
+                else
+                {
+                    depth_cycles_per_task[depth] = CYCLES_PER_TASK_SMOOTHING_FACTOR * new_cycles_per_task +
+                        (1.0 - CYCLES_PER_TASK_SMOOTHING_FACTOR) * depth_cycles_per_task[depth];
+                }
+            }
+        }
+    }
+
+    void compute_ema_work(std::array<double, MAX_DEPTH>& depth_cycles_per_task)
+    {
+        const uint32_t total_workers = thread_count_ - 1;
+
+        double min_depth_cycles_per_task = depth_cycles_per_task[0];
+
+        for (uint32_t d = 1; d < MAX_DEPTH; ++d)
+        {
+            min_depth_cycles_per_task = std::min(min_depth_cycles_per_task, depth_cycles_per_task[d]);
         }
 
-        const uint32_t distributable = total_workers - MAX_DEPTH;
-        const uint32_t max_extra = std::min(
-            std::max<uint32_t>(1, total_workers / 2),
-            distributable);
+        const double depth_cycles_per_task_corrected_factor = (min_depth_cycles_per_task < 1e-9) ? 1 : 1 / min_depth_cycles_per_task;
 
-        if (total_ema > 0.05)
+        for (uint32_t d = 0; d < MAX_DEPTH; ++d)
         {
-            for (uint32_t d = 0; d < MAX_DEPTH; ++d)
+            uint64_t qsize = layer_queues_ptr_->get_queue(d)->size();
+
+            const double corrected_depth_cycles_per_task = depth_cycles_per_task[d] * depth_cycles_per_task_corrected_factor;
+            const double raw = static_cast<double>(qsize) * corrected_depth_cycles_per_task;
+
+            depth_ema_work[d] = WORK_EMA_ALPHA * raw + (1.0 - WORK_EMA_ALPHA) * depth_ema_work[d];
+        }
+    }
+
+    void compute_depth_desired_worker(std::array<uint32_t, MAX_DEPTH>& depth_desired_worker,
+        const std::vector<WorkerSnapshot>& worker_snapshots)
+    {
+        const uint32_t total_workers = thread_count_ - 1;
+
+        std::array<uint32_t, MAX_DEPTH> depth_index{};
+        for (uint32_t d = 0; d < MAX_DEPTH; ++d)
+        {
+            depth_index[d] = d;
+        }
+        for (uint32_t i = 0; i < MAX_DEPTH; ++i)
+        {
+            for (uint32_t j = i + 1; j < MAX_DEPTH; ++j)
             {
-                double share = depth_ema_pressure_[d] / total_ema;
-                uint32_t dynamic_min = 1 + static_cast<uint32_t>(max_extra * share);
-                lower_bound[d] = std::min(dynamic_min, hard_upper_bound);
+                if (depth_ema_work[depth_index[j]] > depth_ema_work[depth_index[i]])
+                {
+                    std::swap(depth_index[i], depth_index[j]);
+                }
+            }
+        }
+
+        if (total_workers <= MAX_DEPTH) [[unlikely]]
+        {
+            depth_desired_worker.fill(0);
+            for (uint32_t ranking = 0;ranking < total_workers;++ranking)
+            {
+                depth_desired_worker[depth_index[ranking]] = 1;
             }
         }
         else
         {
-            lower_bound.fill(1);
+            const uint32_t extra_workers = total_workers - MAX_DEPTH;
+            double total_work = 0.0;
+
+            for (uint32_t d = 0; d < MAX_DEPTH; ++d)
+            {
+                total_work += depth_ema_work[d];
+            }
+
+            if (total_work < 1e-9)
+            {
+                return;
+            }
+
+            depth_desired_worker.fill(0);
+
+            uint32_t assigned_extra = 0;
+
+            for (uint32_t d = 0; d < MAX_DEPTH; ++d)
+            {
+                double depth_shared_part = depth_ema_work[d] / total_work;
+
+                double depth_exact_workers = static_cast<double>(extra_workers) * depth_shared_part;
+
+                const uint32_t depth_whole_workers = static_cast<uint32_t>(std::floor(depth_exact_workers));
+
+                depth_desired_worker[d] = 1 + depth_whole_workers;
+                assigned_extra += depth_whole_workers;
+            }
+
+            uint32_t remaining_extra = extra_workers - assigned_extra;
+            uint32_t ranking = 0;
+            while (remaining_extra > 0)
+            {
+                ++depth_desired_worker[depth_index[ranking]];
+                ranking = (ranking + 1) % MAX_DEPTH;
+                --remaining_extra;
+            }
+        }
+    }
+
+    static int64_t compute_worker_score_at_depth(const WorkerSnapshot& worker_snapshot,
+        const uint32_t& depth)
+    {
+        int64_t score = 0;
+        if (worker_snapshot.depth == depth)
+        {
+            score += 1LL << 50;
+            score += static_cast<int64_t>(worker_snapshot.local_stack_size);
+        }
+        else {
+            score -= static_cast<int64_t>(worker_snapshot.local_stack_size);
+        }
+        return score;
+    }
+
+    static bool cmp_by_depth(const WorkerSnapshot& ws1, const WorkerSnapshot& ws2)
+    {
+        return ws1.depth < ws2.depth;
+    }
+
+    static bool cmp_by_local_stack_size(const WorkerSnapshot& ws1, const WorkerSnapshot& ws2)
+    {
+        return ws1.local_stack_size < ws2.local_stack_size;
+    }
+
+    void send_command_to_workers(const std::array<uint32_t, MAX_DEPTH>& depth_worker_count_snapshot,
+        const std::array<uint32_t, MAX_DEPTH>& depth_desired_worker,
+        std::vector<WorkerSnapshot>& worker_snapshots)
+    {
+        const uint32_t total_workers = thread_count_ - 1;
+
+        std::array<int32_t, MAX_DEPTH>movein_worker_count;
+        movein_worker_count.fill(0);
+        movein_workers_id.clear();
+
+        for (uint32_t d = 0;d < MAX_DEPTH;d++) {
+            movein_worker_count[d] = depth_desired_worker[d] - depth_worker_count_snapshot[d];
+        }
+
+        std::sort(worker_snapshots.begin(), worker_snapshots.begin() + total_workers, cmp_by_depth);
+
+        uint32_t worker_sum = 0;
+        for (uint32_t d = 0;d < MAX_DEPTH;d++)
+        {
+            const uint32_t worker_count_this_depth = depth_worker_count_snapshot[d];
+            if (movein_worker_count[d] < 0)
+            {
+                std::sort(worker_snapshots.begin() + worker_sum,
+                    worker_snapshots.begin() + worker_sum + worker_count_this_depth,
+                    cmp_by_local_stack_size);
+
+                uint32_t index = 0;
+                while (movein_worker_count[d] < 0) {
+                    movein_workers_id.push_back(worker_snapshots[index + worker_sum].worker_id);
+                    ++movein_worker_count[d];
+                    ++index;
+                }
+            }
+            worker_sum += worker_count_this_depth;
+        }
+
+        worker_sum = 0;
+        for (uint32_t d = 0;d < MAX_DEPTH;d++)
+        {
+            const uint32_t worker_count_this_depth = depth_worker_count_snapshot[d];
+            if (movein_worker_count[d] > 0)
+            {
+                for (uint32_t i = 0;i < movein_worker_count[d];i++)
+                {
+                    uint32_t worker_id = movein_workers_id.back();
+                    movein_workers_id.pop_back();
+                    worker_commands_[worker_id].value.store(d, std::memory_order_release);
+                }
+            }
+            worker_sum += worker_count_this_depth;
         }
     }
 
     void scheduler_thread_loop()
     {
-        std::array<uint32_t, MAX_DEPTH> depth_worker_count_snapshot{};
-        std::array<uint32_t, MAX_DEPTH> depth_dynamic_worker_lower_bound{};
-
-        const uint32_t hard_worker_upper_bound = std::max<uint32_t>(1, (thread_count_ - 1) * 3 / 4);
         const uint32_t total_workers = thread_count_ - 1;
 
-        depth_dynamic_worker_lower_bound.fill(1);
+        std::array<uint32_t, MAX_DEPTH> depth_worker_count_snapshot{};
+        std::array<uint64_t, MAX_DEPTH> depth_new_cycles_snapshot{};
+        std::array<uint64_t, MAX_DEPTH> depth_new_taks_snapshot{};
+
+        std::array<double, MAX_DEPTH> depth_cycles_per_task{};
+        std::array<uint64_t, MAX_DEPTH> depth_cycles_snapshot{};
+        std::array<uint64_t, MAX_DEPTH> depth_tasks_snapshot{};
+        std::array<uint32_t, MAX_DEPTH> depth_desired_worker{};
+
+        std::vector<WorkerSnapshot> worker_snapshots(thread_count_ - 1);
+
+        for (uint32_t w = 0;w < total_workers;++w)
+        {
+            worker_snapshots[w].worker_id = w;
+            worker_snapshots[w].depth = w % MAX_DEPTH;
+            worker_snapshots[w].local_stack_size = 0;
+            ++depth_desired_worker[w % MAX_DEPTH];
+        }
+
+        depth_cycles_per_task.fill(1.0);
 
         while (!stop_requested_.load(std::memory_order_acquire) || !all_producers_done())
         {
             bool is_drain = all_producers_done();
 
-            get_depth_worker_count_snapshot(depth_worker_count_snapshot);
-            compute_ema_pressure(depth_worker_count_snapshot);
+            get_snapshot(depth_worker_count_snapshot, worker_snapshots, depth_new_cycles_snapshot, depth_new_taks_snapshot);
+            get_depth_cycles_per_task(depth_cycles_per_task, depth_new_cycles_snapshot, depth_new_taks_snapshot, depth_cycles_snapshot, depth_tasks_snapshot);
+            compute_ema_work(depth_cycles_per_task);
+            compute_depth_desired_worker(depth_desired_worker, worker_snapshots);
+            send_command_to_workers(depth_worker_count_snapshot, depth_desired_worker, worker_snapshots);
 
-            update_dynamic_lower_bounds(depth_dynamic_worker_lower_bound,
-                total_workers, hard_worker_upper_bound);
-
-            // Minimum worker guarantee: ensure non-empty depths have at least 1 worker
-            for (uint32_t d = 0; d < MAX_DEPTH; ++d)
-            {
-                uint32_t qsize = layer_queues_ptr_->get_queue(d)->size();
-                uint32_t min_workers = depth_dynamic_worker_lower_bound[d];
-                if (qsize > 0 && depth_worker_count_snapshot[d] < min_workers)
-                {
-                    uint32_t max_d = 0;
-                    for (uint32_t dd = 1; dd < MAX_DEPTH; ++dd)
-                    {
-                        if (depth_worker_count_snapshot[dd] > depth_worker_count_snapshot[max_d])
-                            max_d = dd;
-                    }
-                    if (depth_worker_count_snapshot[max_d] > min_workers)
-                    {
-                        for (uint32_t w = 0; w < total_workers; ++w)
-                        {
-                            uint32_t wd = worker_infos[w].depth.load(std::memory_order_acquire);
-                            if (wd == max_d)
-                            {
-                                worker_commands_[w].store(d, std::memory_order_release); break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Gradient-based migration with hysteresis
-
-            uint32_t max_d = 0;
-            uint32_t min_d = INVALID_DEPTH;
-            double max_ema = depth_ema_pressure_[0];
-            double min_ema = std::numeric_limits<double>::max();
-
-            for (uint32_t d = 0; d < MAX_DEPTH; ++d)
-            {
-                if (depth_ema_pressure_[d] > max_ema)
-                {
-                    max_ema = depth_ema_pressure_[d];
-                    max_d = d;
-                }
-                if (depth_worker_count_snapshot[d] > 0 && depth_ema_pressure_[d] < min_ema)
-                {
-                    min_ema = depth_ema_pressure_[d];
-                    min_d = d;
-                }
-            }
-
-            if (min_d != INVALID_DEPTH && (max_ema - min_ema) > HYSTERESIS_LOG_DELTA)
-            {
-                if (depth_worker_count_snapshot[max_d] < hard_worker_upper_bound)
-                {
-                    for (uint32_t w = 0; w < total_workers; ++w)
-                    {
-                        uint32_t wd = worker_infos[w].depth.load(std::memory_order_acquire);
-                        if (wd == min_d)
-                        {
-                            worker_commands_[w].store(max_d, std::memory_order_release); break;
-                        }
-                    }
-                }
-            }
-
-            // Drain mode: aggressively move workers from empty depths to non-empty ones
-            if (is_drain) [[unlikely]]
-            {
-
-                auto move_one_empty_to_work = [&]() {
-                    for (uint32_t d = 0; d < MAX_DEPTH; ++d)
-                    {
-                        uint32_t qsize = layer_queues_ptr_->get_queue(d)->size();
-                        if (qsize == 0 && depth_worker_count_snapshot[d] > 0)
-                        {
-                            for (uint32_t td = 0; td < MAX_DEPTH; ++td)
-                            {
-                                if (td == d) continue;
-
-                                uint32_t tqsize = layer_queues_ptr_->get_queue(td)->size();
-                                if (tqsize > 0 && depth_worker_count_snapshot[td] < hard_worker_upper_bound)
-                                {
-                                    for (uint32_t w = 0; w < total_workers; ++w)
-                                    {
-                                        uint32_t wd = worker_infos[w].depth.load(std::memory_order_acquire);
-                                        if (wd == d)
-                                        {
-                                            worker_commands_[w].store(td, std::memory_order_release); return;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    };
-
-                move_one_empty_to_work();
-            }
-
-
-            uint32_t interval = is_drain ? DRAIN_INTERVAL_NS : SCHEDULE_INTERVAL_NS;
-            std::this_thread::sleep_for(std::chrono::nanoseconds(interval));
+            std::this_thread::sleep_for(std::chrono::microseconds(SCHEDULE_INTERVAL_US));
         }
     }
 };
