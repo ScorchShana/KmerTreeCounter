@@ -257,7 +257,7 @@ int process_main()
     const uint32_t pre_counter_num = pre_reader_num * 3;
 
     const uint32_t remaining = n_thread - reader_num - 1;  // -1: export writer
-    const uint32_t parser_num = std::max(1U, remaining / 8);
+    const uint32_t parser_num = std::max(1U, remaining / 10);
     const uint32_t worker_budget = remaining - parser_num;
 
     const auto init_start = std::chrono::steady_clock::now();
@@ -365,7 +365,7 @@ int process_main()
     std::cout << "Average prefix count: " << average_count << std::endl;
 #endif
 
-    const uint32_t fewer_worker_num = std::max<uint32_t>(1U, worker_budget / (1.0 + TASK_CLASSIFIER_RATIO + 0.1));
+    const uint32_t fewer_worker_num = std::max<uint32_t>(1U, worker_budget / (1.0 + TASK_CLASSIFIER_RATIO + 0.8));
     const uint32_t more_worker_num = std::max<uint32_t>(1U, worker_budget - fewer_worker_num);
     const bool high_quailty = (avgQuality >= 33 + 30);
     const uint32_t classifier_num = high_quailty ? fewer_worker_num : more_worker_num;
@@ -504,6 +504,9 @@ int process_main()
     std::cout << "Classifier producer enqueue total spin time: " << classifier_thread_pool->producer_enqueue_spin_time.load() << std::endl;
     std::cout << "Classifier producer dequeue total spin time: " << classifier_thread_pool->producer_dequeue_spin_time.load() << std::endl;
     std::cout << "Classifier enqueue to tree wait cycles: " << classifier_thread_pool->total_classifier_wait_cycles.load() << std::endl;
+    std::cout << "Classifier total local tasks :" << classifier_thread_pool->total_local_tasks.load() << std::endl;
+    std::cout << "Classifier total global tasks :" << classifier_thread_pool->total_global_tasks.load() << std::endl;
+    std::cout << "Classifier total owner tasks :" << classifier_thread_pool->total_owner_tasks.load() << std::endl;
 
     std::cout << "KmerTree total kmers added: " << tree->total_kmers_added.load() << std::endl;
     std::cout << "Kmer total kmers exported: " << classifier_thread_pool->total_kmers_exported.load() << std::endl;

@@ -91,6 +91,7 @@ constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE = 64ULL * 1024;
 // Classifier 线程的任务队列配置常量
 constexpr uint64_t GLOBAL_CLASSIFIER_TASK_QUEUE_CAPACITY = 8ULL << 9; // 全局分类器任务队列容量
 constexpr uint64_t CLASSIFIER_TASK_QUEUES_CAPACITY = 32;
+constexpr uint64_t CLASSIFIER_TASK_QUEUE_HALF_WATERMARK = CLASSIFIER_TASK_QUEUES_CAPACITY / 2;
 
 // 写入文件部分的RingMemoryPool配置常量
 constexpr uint64_t EXPORT_RING_MEMORY_POOL_CAPACITY = 2ULL << 10;     // 导出环形内存池容量（块数），必须为2的幂
@@ -112,7 +113,7 @@ constexpr uint64_t KMER_BIN_SIZE = 2048;
 // constexpr uint32_t MAP_SIZE_FLUSH_INTERVAL = 1024; // 每线程累计新增 key 达到该阈值后批量 flush 到 map_size，降低原子争用
 
 // MPMP环状队列配置常量
-constexpr uint32_t TASK_QUEUE_CAPACITY = 16U * 1024;
+constexpr uint32_t TASK_QUEUE_CAPACITY = 32U * 1024;
 
 
 // Final drain 导出配置

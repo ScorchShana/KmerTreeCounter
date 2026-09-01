@@ -46,7 +46,7 @@ public:
         k(in_k), tail_bits(2 * (k % BASES_PER_U64T)), tail_bytes((tail_bits + 7) / 8), full_words(k / BASES_PER_U64T),
         kmer_bytes(full_words * sizeof(uint64_t) + tail_bytes),
         total_bytes(static_cast<uint32_t>(kmer_bytes + count_max_bytes)),
-        mask((~uint64_t{ 0 }) << (64 - tail_bits)),
+        mask((tail_bits == 0) ? 0 : ((~uint64_t{ 0 }) << (64 - tail_bits))),
         pool_(pool), current_block_(nullptr), current_offset_(0)
     {
         pool_->producer_dequeue(current_block_);
@@ -78,10 +78,13 @@ public:
             full_words * sizeof(uint64_t));
         current_offset_ += full_words * sizeof(uint64_t);
 
-        uint64_t tail_data = kmer_data[full_words] & mask;
-        std::memcpy(current_block_ + current_offset_,
-            reinterpret_cast<const char*>(&tail_data) + (8 - tail_bytes), tail_bytes);
-        current_offset_ += tail_bytes;
+        if (tail_bytes > 0)
+        {
+            uint64_t tail_data = kmer_data[full_words] & mask;
+            std::memcpy(current_block_ + current_offset_,
+                reinterpret_cast<const char*>(&tail_data) + (8 - tail_bytes), tail_bytes);
+            current_offset_ += tail_bytes;
+        }
 
         std::memcpy(current_block_ + current_offset_, &count, count_max_bytes);
         current_offset_ += count_max_bytes;
@@ -107,10 +110,13 @@ public:
                 full_words * sizeof(uint64_t));
             current_offset_ += full_words * sizeof(uint64_t);
 
-            uint64_t tail_data = node.k_mer.data[full_words] & mask;
-            std::memcpy(current_block_ + current_offset_,
-                reinterpret_cast<const char*>(&tail_data) + (8 - tail_bytes), tail_bytes);
-            current_offset_ += tail_bytes;
+            if (tail_bytes > 0)
+            {
+                uint64_t tail_data = node.k_mer.data[full_words] & mask;
+                std::memcpy(current_block_ + current_offset_,
+                    reinterpret_cast<const char*>(&tail_data) + (8 - tail_bytes), tail_bytes);
+                current_offset_ += tail_bytes;
+            }
 
             std::memcpy(current_block_ + current_offset_, &rec_count, count_max_bytes);
             current_offset_ += count_max_bytes;
@@ -134,10 +140,14 @@ public:
                     full_words * sizeof(uint64_t));
                 current_offset_ += full_words * sizeof(uint64_t);
 
-                uint64_t tail_data = node.k_mer.data[full_words] & mask;
-                std::memcpy(current_block_ + current_offset_,
-                    reinterpret_cast<const char*>(&tail_data) + (8 - tail_bytes), tail_bytes);
-                current_offset_ += tail_bytes;
+                if (tail_bytes > 0)
+                {
+                    uint64_t tail_data = node.k_mer.data[full_words] & mask;
+                    std::memcpy(current_block_ + current_offset_,
+                        reinterpret_cast<const char*>(&tail_data) + (8 - tail_bytes), tail_bytes);
+                    current_offset_ += tail_bytes;
+                }
+
 
                 std::memcpy(current_block_ + current_offset_, &rec_count, count_max_bytes);
                 current_offset_ += count_max_bytes;

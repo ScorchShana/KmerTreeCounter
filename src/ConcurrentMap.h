@@ -202,6 +202,7 @@ public:
         }
 
         block_ptr = block_ptr->last_blocks[0];
+        if(block_ptr == nullptr) return;
         // if (block_ptr->last_blocks[SLOT_BLOCK_POINTER_NUM - 1] != nullptr)
         // {
         //     __builtin_prefetch(block_ptr->last_blocks[SLOT_BLOCK_POINTER_NUM - 1], 0, 0);
