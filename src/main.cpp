@@ -460,6 +460,9 @@ int process_main()
     std::cout << "Classifier producer enqueue total spin time: " << classifier_thread_pool->producer_enqueue_spin_time.load() << std::endl;
     std::cout << "Classifier producer dequeue total spin time: " << classifier_thread_pool->producer_dequeue_spin_time.load() << std::endl;
     std::cout << "Classifier enqueue to tree wait cycles: " << classifier_thread_pool->total_classifier_wait_cycles.load() << std::endl;
+    std::cout << "Classifier total local tasks :" << classifier_thread_pool->total_local_tasks.load() << std::endl;
+    std::cout << "Classifier total global tasks :" << classifier_thread_pool->total_global_tasks.load() << std::endl;
+    std::cout << "Classifier total owner tasks :" << classifier_thread_pool->total_owner_tasks.load() << std::endl;
 
     std::cout << "KmerTree total kmers added: " << tree->total_kmers_added.load() << std::endl;
     std::cout << "Kmer total kmers exported: " << classifier_thread_pool->total_kmers_exported.load() << std::endl;

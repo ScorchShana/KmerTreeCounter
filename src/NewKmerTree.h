@@ -97,7 +97,7 @@ class KmerTree
     // 以下是利用 thread_local 防止多线程互斥开销的临时统计数组
     static inline thread_local std::array<uint32_t, 1ULL << (2 * NODE_BASES)> thread_local_block_prefix_counts{};
     static inline thread_local std::array<uint32_t, 1ULL << (2 * NODE_BASES)> thread_local_block_prefix_sums{};
-    static inline thread_local std::array<kmer<N>, SCATTER_BLOCK_BATCH_SIZE * KMER_BLOCK_SIZE / sizeof(kmer<N>)> thread_local_block_for_copy{};
+    static inline thread_local std::array<kmer<N>, SCATTER_BLOCK_BATCH_SIZE* KMER_BLOCK_SIZE / sizeof(kmer<N>)> thread_local_block_for_copy{};
     // 本地任务缓存栈，避免频繁向全局队列 push/pop
     static inline thread_local std::vector<Task<N>> thread_local_task_stack;
     static inline thread_local std::vector<ExportRecord<N>> thread_local_export_buffer;
@@ -568,17 +568,14 @@ private:
         hash_map->add_size(local_size_count);
         */
 
+        thread_local_counting_hash_map.clear();
         for (uint64_t block_index = 0; block_index < current_task.count; ++block_index)
         {
             kmer_block<N>* input_kmer_block = current_task.kmer_blocks[block_index];
 
             for (uint64_t i = 0; i < input_kmer_block->count; ++i)
             {
-                if (!thread_local_counting_hash_map.increment(input_kmer_block->k_mers[i])) [[unlikely]]
-                {
-                    flush_local_counting_hash_map_to_hash_map(hash_map, local_size_count);
-                    thread_local_counting_hash_map.increment(input_kmer_block->k_mers[i]);
-                }
+                thread_local_counting_hash_map.increment(input_kmer_block->k_mers[i]);
             }
             memory_pool->deallocate(input_kmer_block);
         }
@@ -1228,7 +1225,6 @@ private:
     {
         thread_local_counting_hash_map.for_each([&](const kmer<N>& kmer_key, const uint32_t count)
             { hash_map->increment(kmer_key, local_size_count, count); });
-        thread_local_counting_hash_map.clear();
     }
 
     node<N>* ensure_child_slab(node<N>* parent)

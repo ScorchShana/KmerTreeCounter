@@ -113,7 +113,7 @@ constexpr uint64_t KMER_BIN_SIZE = 2048;
 // constexpr uint32_t MAP_SIZE_FLUSH_INTERVAL = 1024; // 每线程累计新增 key 达到该阈值后批量 flush 到 map_size，降低原子争用
 
 // MPMP环状队列配置常量
-constexpr uint32_t TASK_QUEUE_CAPACITY = 16U * 1024;
+constexpr uint32_t TASK_QUEUE_CAPACITY = 32U * 1024;
 
 
 // Final drain 导出配置
