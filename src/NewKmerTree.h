@@ -69,6 +69,7 @@ class KmerTree
     static constexpr size_t MAPS_PER_BLOCK = KMER_BLOCK_SIZE / MAP_STRIDE;
 
     static constexpr uint32_t TASK_ENQUEUE_RETRY_LIMIT = 32;
+    static constexpr uint64_t SCATTER_BLOCK_BATCH_SIZE = 4;
 
     struct DrainFrame
     {
@@ -96,7 +97,7 @@ class KmerTree
     // 以下是利用 thread_local 防止多线程互斥开销的临时统计数组
     static inline thread_local std::array<uint32_t, 1ULL << (2 * NODE_BASES)> thread_local_block_prefix_counts{};
     static inline thread_local std::array<uint32_t, 1ULL << (2 * NODE_BASES)> thread_local_block_prefix_sums{};
-    static inline thread_local std::array<kmer<N>, 4 * KMER_BLOCK_SIZE / sizeof(kmer<N>)> thread_local_block_for_copy{};
+    static inline thread_local std::array<kmer<N>, SCATTER_BLOCK_BATCH_SIZE * KMER_BLOCK_SIZE / sizeof(kmer<N>)> thread_local_block_for_copy{};
     // 本地任务缓存栈，避免频繁向全局队列 push/pop
     static inline thread_local std::vector<Task<N>> thread_local_task_stack;
     static inline thread_local std::vector<ExportRecord<N>> thread_local_export_buffer;
@@ -623,7 +624,8 @@ private:
 
             thread_local_block_prefix_counts.fill(0);
 
-            const uint64_t block_index_boundary = std::min<uint64_t>(current_task.count, cur_block_index + 4);
+            const uint64_t block_index_boundary = std::min<uint64_t>(
+                current_task.count, cur_block_index + SCATTER_BLOCK_BATCH_SIZE);
             for (uint64_t block_index = cur_block_index; block_index < block_index_boundary; block_index++)
             {
                 kmer_block<N>* block_ptr = current_task.kmer_blocks[block_index];
@@ -651,7 +653,7 @@ private:
                     thread_local_block_prefix_sums[prefix]++;
                 }
             }
-            cur_block_index += 4;
+            cur_block_index = block_index_boundary;
 
             flush_block_to_children(current_task.current_node, current_task.depth);
         }
@@ -674,56 +676,109 @@ private:
         }
     }
 
-    void drain_part_of_block_to_child(node<N>* child_node, const uint64_t prefix, const uint64_t block_for_copy_offset, const uint32_t current_depth, std::vector<Task<N>>& drain_stack)
+    void drain_part_of_batch_to_child(node<N>* child_node, const uint64_t prefix, const uint64_t in_block_for_copy_offset, const uint32_t current_depth, std::vector<Task<N>>& drain_stack)
     {
         uint64_t remaining = thread_local_block_prefix_counts[prefix];
-        const uint32_t capacity = get_block_capacity();
+        uint64_t block_for_copy_offset = in_block_for_copy_offset;
+        constexpr uint32_t capacity = get_block_capacity();
 
         __builtin_prefetch(thread_local_block_for_copy.data() + block_for_copy_offset, 0, 0);
 
-        kmer_block<N>* active_block = child_node->active_block;
-        if (active_block == nullptr) [[unlikely]]
+        while (remaining > 0)
         {
-            active_block = reinterpret_cast<kmer_block<N> *>(memory_pool->allocate());
-            active_block->count = 0;
-            child_node->active_block = active_block;
-            child_node->kmer_blocks[child_node->count++] = child_node->active_block;
-        }
-
-        const uint64_t block_original_count = active_block->count;
-        const uint64_t space_left = capacity - block_original_count;
-        const uint64_t first_copy = std::min(space_left, remaining);
-        remaining -= first_copy;
-
-        std::memcpy(child_node->active_block->k_mers.data() + block_original_count,
-            thread_local_block_for_copy.data() + block_for_copy_offset,
-            static_cast<size_t>(first_copy) * sizeof(kmer<N>));
-
-        child_node->active_block->count += first_copy;
-
-        if (remaining > 0)
-        {
-            if (child_node->count >= MAX_KMER_BLOCK_NUM) [[unlikely]]
+            kmer_block<N>* active_block = child_node->active_block;
+            if (active_block == nullptr || active_block->count >= capacity) [[unlikely]]
             {
-                Task<N> new_task;
-                new_task.current_node = child_node;
-                new_task.depth = current_depth + 1;
-                new_task.count = child_node->count;
-                new_task.kmer_blocks = child_node->kmer_blocks;
-                drain_stack.push_back(new_task);
-                child_node->count = 0;
+                if (child_node->count >= MAX_KMER_BLOCK_NUM) [[unlikely]]
+                {
+                    Task<N> new_task{};
+                    new_task.current_node = child_node;
+                    new_task.depth = current_depth + 1;
+                    new_task.count = child_node->count;
+                    new_task.kmer_blocks = child_node->kmer_blocks;
+                    drain_stack.push_back(new_task);
+
+                    child_node->count = 0;
+                    child_node->active_block = nullptr;
+                }
+
+                active_block = reinterpret_cast<kmer_block<N> *>(memory_pool->allocate());
+                active_block->count = 0;
+                child_node->active_block = active_block;
+                child_node->kmer_blocks[child_node->count++] = active_block;
             }
 
-            active_block = reinterpret_cast<kmer_block<N> *>(memory_pool->allocate());
-            active_block->count = 0;
-            child_node->active_block = active_block;
-            child_node->kmer_blocks[child_node->count++] = child_node->active_block;
+            const uint64_t block_original_count = active_block->count;
+            const uint64_t this_copy = std::min<uint64_t>(capacity - block_original_count, remaining);
 
-            std::memcpy(child_node->active_block->k_mers.data(),
-                thread_local_block_for_copy.data() + block_for_copy_offset + first_copy,
-                static_cast<size_t>(remaining) * sizeof(kmer<N>));
+            std::memcpy(active_block->k_mers.data() + block_original_count,
+                thread_local_block_for_copy.data() + block_for_copy_offset,
+                static_cast<size_t>(this_copy) * sizeof(kmer<N>));
 
-            child_node->active_block->count += remaining;
+            active_block->count += this_copy;
+            block_for_copy_offset += this_copy;
+            remaining -= this_copy;
+        }
+    }
+
+    void scatter_drain_kmer_blocks_to_children(const Task<N>& task, node<N>* child_node_base, std::vector<Task<N>>& drain_stack)
+    {
+        uint64_t cur_block_index = 0;
+        const uint32_t depth = static_cast<uint32_t>(task.depth);
+
+        while (cur_block_index < task.count)
+        {
+            thread_local_block_prefix_counts.fill(0);
+
+            const uint64_t block_index_boundary = std::min<uint64_t>(
+                task.count, cur_block_index + SCATTER_BLOCK_BATCH_SIZE);
+            for (uint64_t block_index = cur_block_index; block_index < block_index_boundary; ++block_index)
+            {
+                kmer_block<N>* block_ptr = task.kmer_blocks[block_index];
+                for (uint64_t index = 0; index < block_ptr->count; ++index)
+                {
+                    const uint64_t prefix = get_node_prefix(block_ptr->k_mers[index], depth);
+                    thread_local_block_prefix_counts[prefix]++;
+                }
+            }
+
+            thread_local_block_prefix_sums[0] = 0;
+            for (uint64_t prefix = 1; prefix < thread_local_block_prefix_counts.size(); ++prefix)
+            {
+                thread_local_block_prefix_sums[prefix] =
+                    thread_local_block_prefix_sums[prefix - 1] + thread_local_block_prefix_counts[prefix - 1];
+            }
+
+            for (uint64_t block_index = cur_block_index; block_index < block_index_boundary; ++block_index)
+            {
+                kmer_block<N>* block_ptr = task.kmer_blocks[block_index];
+                for (uint64_t index = 0; index < block_ptr->count; ++index)
+                {
+                    const uint64_t prefix = get_node_prefix(block_ptr->k_mers[index], depth);
+                    const uint64_t pos = thread_local_block_prefix_sums[prefix]++;
+                    thread_local_block_for_copy[pos] = block_ptr->k_mers[index];
+                }
+            }
+
+            for (uint64_t prefix = 0; prefix < thread_local_block_prefix_counts.size(); ++prefix)
+            {
+                if (thread_local_block_prefix_counts[prefix] == 0)
+                {
+                    continue;
+                }
+
+                const uint64_t block_for_copy_offset =
+                    thread_local_block_prefix_sums[prefix] - thread_local_block_prefix_counts[prefix];
+                drain_part_of_batch_to_child(
+                    child_node_base + prefix, prefix, block_for_copy_offset, depth, drain_stack);
+            }
+
+            for (uint64_t block_index = cur_block_index; block_index < block_index_boundary; ++block_index)
+            {
+                memory_pool->deallocate(task.kmer_blocks[block_index]);
+            }
+
+            cur_block_index = block_index_boundary;
         }
     }
 
@@ -844,27 +899,7 @@ private:
             insert_kmer_in_task_to_node_hash_map_with_local_hash_map(t);
             return;
         }
-        for (uint64_t block_index = 0; block_index < t.count; ++block_index)
-        {
-            kmer_block<N>* input_kmer_block = t.kmer_blocks[block_index];
-            calculate_block_prefix_counts(input_kmer_block, static_cast<uint32_t>(t.depth));
-            push_kmers_into_thread_local_block_for_copy(input_kmer_block, static_cast<uint32_t>(t.depth));
-
-            uint64_t current_offset = 0;
-            node<N>* child_node_base = ensure_child_slab(t.current_node);
-
-            for (uint64_t prefix = 0; prefix < (1ULL << (2 * NODE_BASES)); prefix++)
-            {
-                if (thread_local_block_prefix_counts[prefix] == 0)
-                    continue;
-
-                node<N>* child_node = child_node_base + prefix;
-                drain_part_of_block_to_child(child_node, prefix, current_offset, static_cast<uint32_t>(t.depth), drain_stack);
-
-                current_offset += thread_local_block_prefix_counts[prefix];
-            }
-            memory_pool->deallocate(input_kmer_block);
-        }
+        scatter_drain_kmer_blocks_to_children(t, existing_child_slab, drain_stack);
     }
 
     /*void final_drain_range(uint64_t begin, uint64_t end,  &writer)

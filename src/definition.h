@@ -91,6 +91,7 @@ constexpr uint64_t PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE = 64ULL * 1024;
 // Classifier 线程的任务队列配置常量
 constexpr uint64_t GLOBAL_CLASSIFIER_TASK_QUEUE_CAPACITY = 8ULL << 9; // 全局分类器任务队列容量
 constexpr uint64_t CLASSIFIER_TASK_QUEUES_CAPACITY = 32;
+constexpr uint64_t CLASSIFIER_TASK_QUEUE_HALF_WATERMARK = CLASSIFIER_TASK_QUEUES_CAPACITY / 2;
 
 // 写入文件部分的RingMemoryPool配置常量
 constexpr uint64_t EXPORT_RING_MEMORY_POOL_CAPACITY = 2ULL << 10;     // 导出环形内存池容量（块数），必须为2的幂
