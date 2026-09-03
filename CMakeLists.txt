@@ -46,6 +46,7 @@ target_link_libraries(${PROJECT_NAME} atomic)
 
 # 检查头文件
 check_include_file_cxx(numa.h HAVE_NUMA_H)
+find_library(NUMA_LIBRARY numa)
 
 if(HAVE_NUMA_H)
     message(STATUS "numa.h found, enabling NUMA support")
@@ -74,6 +75,44 @@ else()
     message(STATUS "libnuma not found, NUMA support disabled")
 endif()
 add_test(NAME ConcurrentMapTest COMMAND concurrent_map_test 1000 10)
+
+add_executable(concurrent_open_address_hash_map_test tests/test_concurrent_open_address_hash_map.cpp)
+target_link_libraries(concurrent_open_address_hash_map_test pthread rt)
+if(NUMA_LIBRARY)
+    target_link_libraries(concurrent_open_address_hash_map_test ${NUMA_LIBRARY})
+endif()
+add_test(NAME ConcurrentOpenAddressHashMapTest COMMAND concurrent_open_address_hash_map_test)
+set_tests_properties(ConcurrentOpenAddressHashMapTest PROPERTIES TIMEOUT 120)
+
+option(ENABLE_TSAN_TESTS "Build ThreadSanitizer tests" OFF)
+if(ENABLE_TSAN_TESTS)
+    add_executable(concurrent_open_address_hash_map_tsan_test tests/test_concurrent_open_address_hash_map.cpp)
+    target_compile_options(concurrent_open_address_hash_map_tsan_test PRIVATE
+        -O3
+        -g
+        -fsanitize=thread
+        -fno-omit-frame-pointer
+        -fno-lto)
+    set_property(TARGET concurrent_open_address_hash_map_tsan_test
+        APPEND_STRING PROPERTY LINK_FLAGS " -fsanitize=thread -fno-lto")
+    target_link_libraries(concurrent_open_address_hash_map_tsan_test pthread rt)
+    if(NUMA_LIBRARY)
+        target_link_libraries(concurrent_open_address_hash_map_tsan_test ${NUMA_LIBRARY})
+    endif()
+    find_program(SETARCH_EXECUTABLE setarch)
+    if(SETARCH_EXECUTABLE)
+        add_test(NAME ConcurrentOpenAddressHashMapTsanTest
+            COMMAND ${SETARCH_EXECUTABLE} ${CMAKE_SYSTEM_PROCESSOR} -R
+                $<TARGET_FILE:concurrent_open_address_hash_map_tsan_test>)
+    else()
+        add_test(NAME ConcurrentOpenAddressHashMapTsanTest
+            COMMAND concurrent_open_address_hash_map_tsan_test)
+    endif()
+    set_tests_properties(ConcurrentOpenAddressHashMapTsanTest PROPERTIES
+        LABELS "tsan"
+        TIMEOUT 180
+        ENVIRONMENT "TSAN_OPTIONS=halt_on_error=1")
+endif()
 
 add_executable(export_reader_test tests/test_export_reader.cpp)
 target_link_libraries(export_reader_test rt)
