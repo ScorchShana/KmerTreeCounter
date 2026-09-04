@@ -714,7 +714,7 @@ namespace
                     uint64_t bytes = read_compact_high_records<N>(fd, offset, batch,
                                                                   buffer.data(), k_len, count_bytes);
                     for (uint64_t i = 0; i < batch; ++i)
-                        if (in_range(buffer[i].count, min_freq, max_freq))
+                        if (buffer[i].count >= min_freq - 1 && buffer[i].count <= max_freq)
                             hash_map.insert_unique(buffer[i].key, buffer[i].count);
                     remaining -= batch;
                     offset += batch;

@@ -121,6 +121,32 @@ public:
         return capacity;
     }
 
+    ConcurrentOpenAddressHashMap<N>* get_next_map() const
+    {
+        return next_map.load(std::memory_order_acquire);
+    }
+
+    // 遍历当前 map 及所有 next_map segment 中的条目。
+    // Visitor 签名为 void(const kmer<N>& key, uint32_t count)。
+    // 调用方需保证所有写入已结束（如 final drain 阶段），期间不能并发修改。
+    template <typename Visitor>
+    void for_each_entry(Visitor&& visitor) const
+    {
+        const ConcurrentOpenAddressHashMap<N>* map = this;
+        while (map != nullptr)
+        {
+            for (uint64_t i = 0; i < map->capacity; ++i)
+            {
+                const uint8_t ctrl = map->ctrls[i].load(std::memory_order_acquire);
+                if ((ctrl & 0x80U) != 0) [[likely]]
+                {
+                    visitor(map->keys[i], map->counts[i].load(std::memory_order_relaxed));
+                }
+            }
+            map = map->next_map.load(std::memory_order_acquire);
+        }
+    }
+
     static void set_memory_pool(ConcurrentMemoryPool* memory_pool)
     {
         pool = memory_pool;

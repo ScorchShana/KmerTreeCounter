@@ -86,7 +86,6 @@ class SchedulerThreadPool final
     std::vector<uint32_t> movein_workers_id;
 
     std::barrier<> drain_all_done_barrier;
-    std::barrier<> drain_root_done_barrier_;
     FinalDrainWriterThread drain_writer_thread_;
 
     inline static thread_local SpinBackoff<64, 128, 128 + 16, 16> backoff;
@@ -125,7 +124,6 @@ public:
         active_producer(producer_count), tree_ptr_(tree_ptr),
         layer_queues_ptr_(layer_queues_ptr), worker_commands_(thread_count_ - 1), worker_infos(thread_count_ - 1),
         drain_all_done_barrier(thread_count_ - 1 + extra_drain_thread_count_),
-        drain_root_done_barrier_(thread_count_ - 1 + extra_drain_thread_count_),
         drain_writer_thread_(FINAL_DRAIN_RING_POOL_BLOCK_SIZE,
             thread_count_ - 1 + extra_drain_thread_count_)
     {
