@@ -932,7 +932,7 @@ public:
                         insert_kmer_in_task_to_node_hash_map_without_local_hash_map(task);
                         current->count = 0;
                         current->active_block = nullptr;
-                        // export_hash_map(writer, hash_map);
+                        export_hash_map(writer, hash_map);
                     }
                     else
                     {
@@ -944,7 +944,7 @@ public:
                     if (hash_map != nullptr)
                     {
                         // Edge case: has hash map but no pending k-mers in blocks, still need to export hash map contents
-                        // export_hash_map(writer, hash_map);
+                        export_hash_map(writer, hash_map);
                     }
                 }
                 continue;
@@ -1390,7 +1390,11 @@ private:
 
     void export_hash_map(FinalDrainWriter<N>& writer, ConcurrentOpenAddressHashMap<N>* hash_map)
     {
-
+        hash_map->for_each_entry(
+            [&](const kmer<N>& key, const uint32_t count)
+            {
+                append_export_record(writer, key, count);
+            });
     }
 
     void ensure_spare_block()
