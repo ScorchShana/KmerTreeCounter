@@ -250,9 +250,9 @@ int process_main()
         if (f.size() >= 3 && f.compare(f.size() - 3, 3, ".gz") == 0) gz_count++;
     }
     const uint32_t reader_num = (gz_count >= 2) ? 2 : 1;
-    
+
     const uint32_t preReadThreadsNum = std::max(1U, n_thread / 8);
-    const uint32_t pre_reader_num = std::min(gz_count, preReadThreadsNum);
+    const uint32_t pre_reader_num = std::min<uint32_t>(filenames.size(), preReadThreadsNum);
     const uint32_t pre_parser_num = pre_reader_num * 4;
     const uint32_t pre_counter_num = pre_reader_num * 3;
 
@@ -387,8 +387,7 @@ int process_main()
     // 确保 Arena 已初始化，才能安全分配内存
     pool->init_arenas();
     // pool->perform_first_touch(n_thread);
-    ConcurrentMap<N>::set_thread_num(std::max(1U, tasker_num - 1U) + n_thread);
-    ConcurrentMap<N>::set_k_length(k_len);
+
     // 初始化 k-mer 字典树(KmerTree)的核心结构，整合前述多个组件
     auto tree = std::make_shared<KmerTree<N>>(k_len, pool.get(), layer_queues.get(), export_ring_pool.get());
     // 初始化布隆过滤器的MPSC队列
@@ -586,7 +585,7 @@ int main(int argc, char* argv[])
 
         if (argc >= 7)
         {
-            kmer_concurrent_hash_map_capacity = std::max<uint32_t>(1024, std::bit_ceil(std::stoul(argv[6])));
+            kmer_concurrent_hash_map_capacity = std::max<uint32_t>(4096, std::bit_ceil(std::stoul(argv[6])));
         }
         if (argc >= 8)
         {

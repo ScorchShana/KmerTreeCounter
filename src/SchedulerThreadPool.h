@@ -6,7 +6,7 @@
 #include "SPSCRingQueue.h"
 #include "NewKmerTree.h"
 #include "../src/SpinBackoff.h"
-#include "ConcurrentMap.h"
+#include "ConcurrentOpenAddressHashMap.h"
 #include "FinalDrainWriterThread.h"
 #include "SplitMix.h"
 
@@ -428,7 +428,7 @@ private:
 #if HAS_LIBNUMA
         numa_run_on_node(numa_nodes[(worker_id + 1) % numa_nodes.size()]);
 #endif
-        ConcurrentMap<N>::set_thread_id(worker_id);
+        ConcurrentOpenAddressHashMap<N>::set_memory_pool(tree_ptr_->get_memory_pool());
         uint32_t loop_round = 0;
 
         while (!stop_requested_.load(std::memory_order_acquire) || !all_producers_done())
@@ -474,7 +474,7 @@ private:
                     uint32_t extra_id = total_workers + i;
                     extra_drain_threads_.emplace_back([this, extra_id]()
                         {
-                            ConcurrentMap<N>::set_thread_id(extra_id);
+                            ConcurrentOpenAddressHashMap<N>::set_memory_pool(tree_ptr_->get_memory_pool());
                             drain_all(extra_id % MAX_DEPTH);
                             drain_all_done_barrier.arrive_and_wait();
 
@@ -485,9 +485,6 @@ private:
                             while (fq->try_dequeue(task))
                                 tree_ptr_->final_drain_root(task.current_node, writer);
 
-                            drain_root_done_barrier_.arrive_and_wait();
-
-                            ConcurrentMap<N>::export_thread_node_count(writer, extra_id);
                             writer.close();
                             drain_writer_thread_.pool()->producer_set_finished();
 #ifdef TEST_MODE
@@ -511,9 +508,6 @@ private:
             while (fq->try_dequeue(task))
                 tree_ptr_->final_drain_root(task.current_node, writer);
 
-            drain_root_done_barrier_.arrive_and_wait();
-
-            ConcurrentMap<N>::export_thread_node_count(writer, worker_id);
             writer.close();
             drain_writer_thread_.pool()->producer_set_finished();
 #ifdef TEST_MODE

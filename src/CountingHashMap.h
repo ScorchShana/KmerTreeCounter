@@ -270,7 +270,7 @@ void CountingHashMap<N, ValueType>::for_each(Func&& func) const
         }
     }
 }
-int a = sizeof(CountingHashMap<1, uint16_t>);
+
 template <uint32_t N, typename ValueType>
 void CountingHashMap<N, ValueType>::clear()
 {

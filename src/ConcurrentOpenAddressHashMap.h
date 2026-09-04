@@ -15,11 +15,16 @@ template <uint32_t N>
 class ConcurrentOpenAddressHashMap
 {
 
+    static constexpr size_t align_up(const size_t value, const size_t alignment)
+    {
+        return (value + alignment - 1) & ~(alignment - 1);
+    }
+
     constexpr static uint8_t EMPTY = 0x00;
     constexpr static uint8_t INSERTING = 0x01;
     constexpr static double LOAD_FACTOR = 0.8;
 
-    static constexpr std::size_t MAP_SIZE = sizeof(ConcurrentOpenAddressHashMap<N>);
+    static constexpr std::size_t MAP_SIZE = align_up(sizeof(ConcurrentOpenAddressHashMap<N>), CACHE_LINE_SIZE);
     static constexpr std::size_t MAP_NUM_PER_BLOCK = KMER_BLOCK_SIZE / MAP_SIZE;
 
     std::atomic<int64_t> size;
@@ -137,8 +142,8 @@ public:
     InsertResult try_increment(
         uint64_t index,
         const kmer<N>& key,
-        uint8_t fp,
-        uint64_t value,
+        const uint8_t fp,
+        const uint32_t value,
         uint64_t& local_count)
     {
         const int64_t cur_max_size = static_cast<int64_t>(capacity * LOAD_FACTOR);
@@ -202,7 +207,8 @@ public:
                         notify_debug_hook(DebugEvent::AFTER_SIZE_RESERVED_BEFORE_PUBLISH, this, key);
 #endif
                         keys[index] = key;
-                        counts[index].store(value, std::memory_order_release);
+                        const uint32_t corrected_value = std::min<uint32_t>(value, count_max);
+                        counts[index].store(corrected_value, std::memory_order_release);
                         ctrls[index].store(fp, std::memory_order_release); // Set the fingerprint
                         ++local_count;
                         return InsertResult::INSERTED; // Return true if we need to build next map
@@ -222,7 +228,7 @@ public:
                     if (cur < count_max)
                     {
                         const uint32_t increment = static_cast<uint32_t>(
-                            std::min<uint64_t>(value, count_max));
+                            std::min<uint32_t>(value, count_max));
                         const uint32_t prev = counts[index].fetch_add(increment, std::memory_order_relaxed);
                         if (increment > count_max - std::min(prev, count_max)) [[unlikely]]
                         {
@@ -245,7 +251,7 @@ public:
         }
     }
 
-    void increment(const kmer<N>& key, const uint64_t& value, uint64_t& local_count) {
+    void increment(const kmer<N>& key, const uint32_t& value, uint64_t& local_count) {
         const uint64_t h = hash_key(key);
         const uint8_t fp = fingerprint(h);
         const uint64_t mod = capacity - 1;
@@ -384,8 +390,5 @@ public:
         }
     }
 };
-
-const int a = ConcurrentOpenAddressHashMap<2>::get_mem_size(4096);
-const int b = sizeof(ConcurrentOpenAddressHashMap<2>);
 
 #endif
