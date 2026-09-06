@@ -484,14 +484,7 @@ private:
     void insert_kmer_in_task_to_node_hash_map_with_local_hash_map(const Task<N>& current_task)
     {
         node<N>* parent = current_task.current_node;
-        // const uint64_t root_prefix = get_root_prefix(current_task.kmer_blocks[0]->k_mers[0]);
-        ConcurrentOpenAddressHashMap<N>* hash_map = ensure_hash_map(parent, concurrent_hash_map_min_capacity);
 
-        if (hash_map == nullptr) [[unlikely]]
-        {
-            thread_local_task_stack.push_back(current_task);
-            return;
-        }
 
         uint64_t local_size_count = 0;
 
@@ -504,10 +497,25 @@ private:
             {
                 thread_local_counting_hash_map.increment(input_kmer_block->k_mers[i]);
             }
-            memory_pool->deallocate(input_kmer_block);
+        }
+
+        uint64_t hash_map_capacity = std::bit_ceil(thread_local_counting_hash_map.size() * 5 / 4);
+        hash_map_capacity = std::max<uint64_t>(hash_map_capacity, 1024);
+        ConcurrentOpenAddressHashMap<N>* hash_map = ensure_hash_map(parent, hash_map_capacity);
+
+        if (hash_map == nullptr) [[unlikely]]
+        {
+            thread_local_task_stack.push_back(current_task);
+            return;
         }
 
         flush_local_counting_hash_map_to_hash_map(hash_map, local_size_count);
+
+        for (uint64_t block_index = 0; block_index < current_task.count; ++block_index) {
+            kmer_block<N>* input_kmer_block = current_task.kmer_blocks[block_index];
+            memory_pool->deallocate(input_kmer_block);
+        }
+
         thread_local_kmers_in_map += local_size_count;
     }
 
