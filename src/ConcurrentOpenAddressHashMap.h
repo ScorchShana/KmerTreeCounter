@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <map>
 
 template <uint32_t N>
 class ConcurrentOpenAddressHashMap
@@ -41,6 +42,10 @@ class ConcurrentOpenAddressHashMap
     inline static thread_local ConcurrentMemoryPool* pool = nullptr;
 
 public:
+
+#ifdef TEST_MODE
+    inline static thread_local std::map<uint32_t, uint32_t> segment_histogram;
+#endif 
 
     enum class InsertResult
     {
@@ -92,10 +97,10 @@ public:
         {
             new (ctrls + i) std::atomic<uint8_t>(EMPTY);
         }
-        for (uint64_t i = 0; i < capacity; ++i)
-        {
-            new (counts + i) std::atomic<uint32_t>(0);
-        }
+        // for (uint64_t i = 0; i < capacity; ++i)
+        // {
+        //     new (counts + i) std::atomic<uint32_t>(0);
+        // }
     }
 
     static constexpr uint64_t get_mem_size(const uint64_t capacity) {
@@ -147,6 +152,23 @@ public:
         }
     }
 
+#ifdef TEST_MODE
+    void count_to_histogram() {
+        const ConcurrentOpenAddressHashMap<N>* map = this;
+        uint32_t cnt = 0;
+        while (map != nullptr)
+        {
+            cnt++;
+            map = map->next_map.load(std::memory_order_acquire);
+        }
+        segment_histogram[cnt]++;
+    }
+
+    static std::map<uint32_t, uint32_t> get_segment_histogram() {
+        return segment_histogram;
+    }
+#endif
+
     static void set_memory_pool(ConcurrentMemoryPool* memory_pool)
     {
         pool = memory_pool;
@@ -166,7 +188,7 @@ public:
     }
 
     InsertResult try_increment(
-        uint64_t index,
+        uint64_t h,
         const kmer<N>& key,
         const uint8_t fp,
         const uint32_t value,
@@ -174,6 +196,7 @@ public:
     {
         const int64_t cur_max_size = static_cast<int64_t>(capacity * LOAD_FACTOR);
         const uint64_t mod = capacity - 1;
+        uint64_t index = h & mod;
         uint64_t offset = 0;
 
         for (;;) {
@@ -234,7 +257,7 @@ public:
 #endif
                         keys[index] = key;
                         const uint32_t corrected_value = std::min<uint32_t>(value, count_max);
-                        counts[index].store(corrected_value, std::memory_order_release);
+                        new (counts + index) std::atomic<uint32_t>(corrected_value);
                         ctrls[index].store(fp, std::memory_order_release); // Set the fingerprint
                         ++local_count;
                         return InsertResult::INSERTED; // Return true if we need to build next map
@@ -280,14 +303,12 @@ public:
     void increment(const kmer<N>& key, const uint32_t& value, uint64_t& local_count) {
         const uint64_t h = hash_key(key);
         const uint8_t fp = fingerprint(h);
-        const uint64_t mod = capacity - 1;
-        uint64_t index = h & mod;
 
         ConcurrentOpenAddressHashMap<N>* map_ptr = this;
 
         for (;;)
         {
-            InsertResult res = map_ptr->try_increment(index, key, fp, value, local_count);
+            InsertResult res = map_ptr->try_increment(h, key, fp, value, local_count);
             if (res == InsertResult::FULL)
             {
                 map_ptr = map_ptr->ensure_next_map();
@@ -391,7 +412,8 @@ public:
                     {
                         // Build the next map
                         ConcurrentOpenAddressHashMap<N>* new_map = reinterpret_cast<ConcurrentOpenAddressHashMap<N>*>(get_map_metadata_mem());
-                        new(new_map) ConcurrentOpenAddressHashMap<N>(capacity);
+                        uint64_t new_capacity = std::min<uint64_t>(capacity * 2, concurrent_hash_map_max_capacity); // Double the capacity for the next map
+                        new(new_map) ConcurrentOpenAddressHashMap<N>(new_capacity);
                         next_map.store(new_map, std::memory_order_release);
                         building_next.store(false, std::memory_order_release);
                         return new_map;

@@ -109,6 +109,8 @@ class SchedulerThreadPool final
     std::array<std::atomic<uint64_t>, MAX_DEPTH> total_depth_steal_tasks{};
     std::array<std::atomic<uint64_t>, MAX_DEPTH> total_depth_home_tasks{};
     std::vector<std::size_t> max_local_stack_size;
+    std::mutex segment_histogram_lock;
+    std::map<uint32_t, uint32_t> segment_histogram;
 #endif
 
 public:
@@ -160,6 +162,10 @@ public:
         }
         std::cout << "SchedulerThreadPool Max Local Stack Size : " << max_local_stack_size_total << std::endl;
 
+        for(const auto& p : segment_histogram)
+        {
+            std::cout << "Segment " << p.first << " : " << p.second << std::endl;
+        }
 #endif
     }
 
@@ -488,6 +494,12 @@ private:
 #ifdef TEST_MODE
                             final_drain_writer_producer_enqueue_spin_time.fetch_add(writer.producer_enqueue_spin_time, std::memory_order_relaxed);
                             final_drain_writer_producer_dequeue_spin_time.fetch_add(writer.producer_dequeue_spin_time, std::memory_order_relaxed);
+                            {
+                                std::lock_guard<std::mutex> lock(segment_histogram_lock);
+                                for (auto p : ConcurrentOpenAddressHashMap<N>::get_segment_histogram()) {
+                                    segment_histogram[p.first] += p.second;
+                                }
+                            }
 #endif
                         });
                 }
@@ -511,6 +523,12 @@ private:
 #ifdef TEST_MODE
             final_drain_writer_producer_enqueue_spin_time.fetch_add(writer.producer_enqueue_spin_time, std::memory_order_relaxed);
             final_drain_writer_producer_dequeue_spin_time.fetch_add(writer.producer_dequeue_spin_time, std::memory_order_relaxed);
+            {
+                std::lock_guard<std::mutex> lock(segment_histogram_lock);
+                for (auto p : ConcurrentOpenAddressHashMap<N>::get_segment_histogram()) {
+                    segment_histogram[p.first] += p.second;
+                }
+            }
 #endif
         }
 
