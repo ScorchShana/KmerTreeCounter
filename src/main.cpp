@@ -51,11 +51,6 @@ void get_MAX_BLOOM_FILTER_CAPACITY()
     MAX_BLOOM_FILTER_CAPACITY = std::max<uint64_t>(MIN_BLOOM_FILTER_CAPACITY, corrected_memory_average_capacity);
 }
 
-uint64_t get_estimated_total_kmer(const uint64_t estimated_file_size)
-{
-    return estimated_file_size * 30 / 3 / std::max(k_len, 31U);
-}
-
 void lpt(std::vector<std::atomic<uint32_t>>& prefix_counts, uint32_t classifier_num)
 {
     struct PrefixInfo
@@ -108,15 +103,13 @@ void lpt(std::vector<std::atomic<uint32_t>>& prefix_counts, uint32_t classifier_
     }
 }
 
-void calculate_bloom_filter_capacity(std::vector<std::atomic<uint32_t>>& prefix_counts, uint64_t estimated_file_size)
+void calculate_bloom_filter_capacity(std::vector<std::atomic<uint32_t>>& prefix_counts, uint64_t estimated_total_kmers)
 {
 
     const double error_rate = std::pow(10.0, -(avgQuality - 33) * 0.1);
     const uint64_t quarter_memory_average_capacity = memory_limit * 1024ULL * 1024ULL * 1024ULL / 4 / sizeof(uint64_t) / (1ULL << (2 * ROOT_BASES));
     const double singleton_rate_cause_by_error = 1.0 - std::pow(1.0 - error_rate, k_len);
     const double capacity_error_factor = std::min(0.5 + singleton_rate_cause_by_error, 1.0);
-
-    const uint64_t estimated_total_kmers = get_estimated_total_kmer(estimated_file_size);
 
 #ifdef TEST_MODE
     std::cout << "Estimated total k-mers: " << estimated_total_kmers << std::endl;
@@ -285,10 +278,6 @@ int process_main()
     for (uint32_t i = 0; i < pre_reader_num; ++i)
         pre_readers.emplace_back(std::make_unique<FastqPreReader<N>>(pre_reader_files[i], k_len, FASTQ_FILE_CHUNK_SIZE, reader_parser_ring_pool.get()));
 
-    estimated_file_size = 0;
-    for (auto& pr : pre_readers)
-        estimated_file_size += pr->get_estimated_raw_fastq_file_size();
-
     std::vector<std::thread> pre_reader_threads;
     pre_reader_threads.reserve(pre_reader_num);
     for (auto& pr : pre_readers)
@@ -348,6 +337,54 @@ int process_main()
         t.join();
     }
 
+    // 聚合各 reader 预读采样的字节数
+    uint64_t sampled_plain_bytes = 0;
+    uint64_t sampled_gz_decompressed_bytes = 0;
+    uint64_t sampled_gz_compressed_bytes = 0;
+    for (auto& pr : pre_readers)
+    {
+        sampled_plain_bytes += pr->get_sampled_plain_bytes();
+        sampled_gz_decompressed_bytes += pr->get_sampled_gz_decompressed_bytes();
+        sampled_gz_compressed_bytes += pr->get_sampled_gz_compressed_bytes();
+    }
+
+    // 根据采样得到的实际解压比重新估计完整 FASTQ 大小(替代原来的 *4)
+    uint64_t total_plain_file_size = 0;
+    uint64_t total_gz_compressed_file_size = 0;
+    for (const auto& f : filenames)
+    {
+        int fd = ::open(f.data(), O_RDONLY);
+        if (fd < 0) continue;
+        struct stat st;
+        if (::fstat(fd, &st) == 0)
+        {
+            unsigned char buf[2];
+            ssize_t n = ::read(fd, buf, 2);
+            if (n == 2 && buf[0] == 0x1F && buf[1] == 0x8B)
+                total_gz_compressed_file_size += static_cast<uint64_t>(st.st_size);
+            else
+                total_plain_file_size += static_cast<uint64_t>(st.st_size);
+        }
+        ::close(fd);
+    }
+    double gz_ratio = 1.0;
+    if (sampled_gz_compressed_bytes > 0)
+        gz_ratio = static_cast<double>(sampled_gz_decompressed_bytes) / static_cast<double>(sampled_gz_compressed_bytes);
+    estimated_file_size = total_plain_file_size
+        + static_cast<uint64_t>(static_cast<double>(total_gz_compressed_file_size) * gz_ratio);
+    if (estimated_file_size == 0) estimated_file_size = 1;
+
+    // 保存预读得到的原始 prefix 计数(在 clamp 之前), 用于估计总 k-mer 数
+    uint64_t sampled_kmer_count = 0;
+    for (const auto& v : prefix_counts)
+        sampled_kmer_count += v.load(std::memory_order_relaxed);
+
+    const uint64_t sampled_raw_bytes = sampled_plain_bytes + sampled_gz_decompressed_bytes;
+    uint64_t estimated_total_kmers = 1;
+    if (sampled_raw_bytes > 0)
+        estimated_total_kmers = static_cast<uint64_t>(
+            (static_cast<__uint128_t>(sampled_kmer_count) * estimated_file_size) / sampled_raw_bytes);
+
     uint64_t average_count = 0;
 
     for (uint64_t i = 0; i < prefix_counts.size(); i++)
@@ -379,7 +416,7 @@ int process_main()
 
     get_MAX_BLOOM_FILTER_CAPACITY();
     lpt(prefix_counts, classifier_num);
-    calculate_bloom_filter_capacity(prefix_counts, estimated_file_size);
+    calculate_bloom_filter_capacity(prefix_counts, estimated_total_kmers);
     // calculate_concurrent_map_capacity(prefix_counts);
 
     get_numa_nodes();
