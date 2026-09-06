@@ -16,6 +16,12 @@ template <uint32_t N>
 class ConcurrentOpenAddressHashMap
 {
 
+
+    struct alignas(CACHE_LINE_SIZE) SizeCounter
+    {
+        std::atomic<int64_t> value{ 0 };
+    };
+
     static constexpr size_t align_up(const size_t value, const size_t alignment)
     {
         return (value + alignment - 1) & ~(alignment - 1);
@@ -28,7 +34,8 @@ class ConcurrentOpenAddressHashMap
     static constexpr std::size_t MAP_SIZE = align_up(sizeof(ConcurrentOpenAddressHashMap<N>), CACHE_LINE_SIZE);
     static constexpr std::size_t MAP_NUM_PER_BLOCK = KMER_BLOCK_SIZE / MAP_SIZE;
 
-    std::atomic<int64_t> size;
+    SizeCounter size;
+    uint64_t segment_id;
     uint64_t capacity;
     std::atomic<uint8_t>* ctrls;
     kmer<N>* keys;
@@ -87,8 +94,9 @@ public:
 #endif
 
     ConcurrentOpenAddressHashMap(uint64_t capacity)
-        : size(0), capacity(capacity), sealed(false), building_next(false), next_map(nullptr)
+        : segment_id(0), capacity(capacity), sealed(false), building_next(false), next_map(nullptr)
     {
+        size.value.store(0, std::memory_order_relaxed);
         char* mem_area = reinterpret_cast<char*>(pool->allocate_large(get_mem_size(capacity)));
         ctrls = reinterpret_cast<std::atomic<uint8_t>*>(mem_area);
         keys = reinterpret_cast<kmer<N>*>(ctrls + capacity);
@@ -241,11 +249,11 @@ public:
                         return InsertResult::FULL; // Indicate that the map is full
                     }
                     // Successfully marked as inserting
-                    const uint64_t old_size = size.fetch_add(1, std::memory_order_acq_rel);
+                    const uint64_t old_size = size.value.fetch_add(1, std::memory_order_acq_rel);
 
                     if (old_size >= static_cast<uint64_t>(cur_max_size)) [[unlikely]]
                     {
-                        size.fetch_sub(1, std::memory_order_acq_rel); // Revert size increment
+                        size.value.fetch_sub(1, std::memory_order_acq_rel); // Revert size increment
                         ctrls[index].store(EMPTY, std::memory_order_release); // Revert control to EMPTY
                         sealed.store(true, std::memory_order_release);
                         return InsertResult::FULL; // Indicate that the map is full
@@ -351,7 +359,7 @@ public:
         while (map != nullptr)
         {
             visitor(segment_index,
-                map->size.load(std::memory_order_acquire),
+                map->size.value.load(std::memory_order_acquire),
                 map->sealed.load(std::memory_order_acquire),
                 map->capacity);
             map = map->next_map.load(std::memory_order_acquire);
@@ -414,6 +422,7 @@ public:
                         ConcurrentOpenAddressHashMap<N>* new_map = reinterpret_cast<ConcurrentOpenAddressHashMap<N>*>(get_map_metadata_mem());
                         uint64_t new_capacity = std::min<uint64_t>(capacity * 2, concurrent_hash_map_max_capacity); // Double the capacity for the next map
                         new(new_map) ConcurrentOpenAddressHashMap<N>(new_capacity);
+                        new_map->segment_id = this->segment_id + 1;
                         next_map.store(new_map, std::memory_order_release);
                         building_next.store(false, std::memory_order_release);
                         return new_map;
