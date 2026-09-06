@@ -55,6 +55,27 @@ struct Snapshot
     bool duplicate_key = false;
 };
 
+class ScopedMapMaxCapacity
+{
+public:
+    explicit ScopedMapMaxCapacity(uint64_t max_capacity)
+        : previous_max_capacity_(concurrent_hash_map_max_capacity)
+    {
+        concurrent_hash_map_max_capacity = max_capacity;
+    }
+
+    ~ScopedMapMaxCapacity()
+    {
+        concurrent_hash_map_max_capacity = previous_max_capacity_;
+    }
+
+    ScopedMapMaxCapacity(const ScopedMapMaxCapacity&) = delete;
+    ScopedMapMaxCapacity& operator=(const ScopedMapMaxCapacity&) = delete;
+
+private:
+    uint64_t previous_max_capacity_;
+};
+
 Kmer make_kmer(uint64_t value)
 {
     Kmer key{};
@@ -66,6 +87,28 @@ Kmer make_kmer(uint64_t value)
 uint64_t segment_limit(uint64_t capacity)
 {
     return static_cast<uint64_t>(static_cast<double>(capacity) * 0.8);
+}
+
+uint64_t next_segment_capacity(uint64_t capacity, uint64_t max_capacity)
+{
+    return std::min<uint64_t>(capacity * 2, max_capacity);
+}
+
+std::vector<uint64_t> expected_segment_capacities(uint64_t entry_count,
+    uint64_t initial_capacity,
+    uint64_t max_capacity)
+{
+    std::vector<uint64_t> capacities;
+    uint64_t capacity = initial_capacity;
+    capacities.push_back(capacity);
+
+    while (entry_count > segment_limit(capacity))
+    {
+        entry_count -= segment_limit(capacity);
+        capacity = next_segment_capacity(capacity, max_capacity);
+        capacities.push_back(capacity);
+    }
+    return capacities;
 }
 
 void add_expected(Counts& expected, const Operation& op)
@@ -108,7 +151,8 @@ Snapshot take_snapshot(const Map& map)
 
 bool validate_map(const Map& map,
     const Counts& expected,
-    uint64_t capacity,
+    uint64_t initial_capacity,
+    uint64_t max_capacity,
     const char* label)
 {
     const Snapshot snapshot = take_snapshot(map);
@@ -135,23 +179,25 @@ bool validate_map(const Map& map,
         return false;
     }
 
-    const uint64_t limit = segment_limit(capacity);
-    const uint64_t expected_segments = expected.empty()
-        ? 1
-        : (static_cast<uint64_t>(expected.size()) + limit - 1) / limit;
-    if (snapshot.segments.size() != expected_segments)
+    const std::vector<uint64_t> expected_capacities = expected_segment_capacities(
+        static_cast<uint64_t>(expected.size()), initial_capacity, max_capacity);
+    if (snapshot.segments.size() != expected_capacities.size())
     {
         std::cerr << label << ": segment count mismatch: expected "
-                  << expected_segments << ", got " << snapshot.segments.size() << "\n";
+                  << expected_capacities.size() << ", got " << snapshot.segments.size() << "\n";
         return false;
     }
 
     for (size_t i = 0; i < snapshot.segments.size(); ++i)
     {
         const SegmentSnapshot& segment = snapshot.segments[i];
-        if (segment.capacity != capacity)
+        const uint64_t expected_capacity = expected_capacities[i];
+        const uint64_t limit = segment_limit(expected_capacity);
+        if (segment.capacity != expected_capacity)
         {
-            std::cerr << label << ": segment " << i << " capacity mismatch\n";
+            std::cerr << label << ": segment " << i
+                      << " capacity mismatch: expected " << expected_capacity
+                      << ", got " << segment.capacity << "\n";
             return false;
         }
         if (segment.size < 0 || static_cast<uint64_t>(segment.size) != segment.entries)
@@ -170,6 +216,13 @@ bool validate_map(const Map& map,
         if (!is_tail && !segment.sealed)
         {
             std::cerr << label << ": non-tail segment " << i << " is not sealed\n";
+            return false;
+        }
+        if (!is_tail && segment.entries != limit)
+        {
+            std::cerr << label << ": non-tail segment " << i
+                      << " entry count mismatch: expected " << limit
+                      << ", got " << segment.entries << "\n";
             return false;
         }
         if (is_tail && segment.sealed)
@@ -251,47 +304,74 @@ long long run_parallel(Map& map,
     return max_elapsed_ns.load(std::memory_order_acquire);
 }
 
-bool test_empty_and_segment_boundaries()
+bool test_growth_boundaries_and_old_key_updates()
 {
-    constexpr uint64_t capacity = 4;
-    Map map(capacity);
+    constexpr uint64_t initial_capacity = 8;
+    constexpr uint64_t max_capacity = 32;
+    ScopedMapMaxCapacity scoped_max_capacity(max_capacity);
+    Map map(initial_capacity);
     Counts expected;
     uint64_t local_count = 0;
-    if (!validate_map(map, expected, capacity, "empty"))
+    if (!validate_map(map, expected, initial_capacity, max_capacity, "empty"))
     {
         return false;
     }
 
-    for (uint64_t i = 0; i < 3; ++i)
+    std::vector<Kmer> keys;
+    keys.reserve(44);
+    for (uint64_t i = 0; i < 44; ++i)
     {
-        insert_one(map, { make_kmer(100 + i), 1 }, local_count, expected);
-    }
-    if (!validate_map(map, expected, capacity, "exact threshold"))
-    {
-        return false;
-    }
+        const Kmer key = make_kmer(100 + i);
+        keys.push_back(key);
+        insert_one(map, { key, 1 }, local_count, expected);
 
-    insert_one(map, { make_kmer(200), 1 }, local_count, expected);
-    if (!validate_map(map, expected, capacity, "first expansion"))
-    {
-        return false;
-    }
+        const uint64_t inserted = i + 1;
+        const char* label = nullptr;
+        switch (inserted)
+        {
+        case 6: label = "growth boundary 6"; break;
+        case 7: label = "growth boundary 7"; break;
+        case 18: label = "growth boundary 18"; break;
+        case 19: label = "growth boundary 19"; break;
+        case 43: label = "growth boundary 43"; break;
+        case 44: label = "growth boundary 44"; break;
+        default: break;
+        }
 
-    for (uint64_t i = 0; i < 7; ++i)
-    {
-        insert_one(map, { make_kmer(300 + i), 1 }, local_count, expected);
+        if (label != nullptr &&
+            !validate_map(map, expected, initial_capacity, max_capacity, label))
+        {
+            return false;
+        }
     }
     if (local_count != expected.size())
     {
         std::cerr << "boundary: local_count mismatch\n";
         return false;
     }
-    return validate_map(map, expected, capacity, "multi-segment boundary");
+
+    const uint64_t local_count_before_updates = local_count;
+    const size_t segment_key_indices[] = { 0, 6, 18 };
+    for (size_t key_index : segment_key_indices)
+    {
+        insert_one(map, { keys[key_index], 7 }, local_count, expected);
+    }
+    if (local_count != local_count_before_updates)
+    {
+        std::cerr << "old-key updates: local_count unexpectedly increased\n";
+        return false;
+    }
+    return validate_map(map,
+        expected,
+        initial_capacity,
+        max_capacity,
+        "old-key updates across segments");
 }
 
 bool test_hot_key(ConcurrentMemoryPool& pool)
 {
     constexpr uint64_t capacity = 8;
+    ScopedMapMaxCapacity scoped_max_capacity(capacity);
     constexpr size_t thread_count = 8;
     constexpr size_t operations_per_thread = 4'000;
     const Kmer hot_key = make_kmer(10'000);
@@ -319,7 +399,7 @@ bool test_hot_key(ConcurrentMemoryPool& pool)
         std::cerr << "hot key: expected one unique insertion, got " << unique_count << "\n";
         return false;
     }
-    return validate_map(map, expected, capacity, "hot key");
+    return validate_map(map, expected, capacity, capacity, "hot key");
 }
 
 bool test_mixed_workload(ConcurrentMemoryPool& pool,
@@ -328,7 +408,9 @@ bool test_mixed_workload(ConcurrentMemoryPool& pool,
     size_t operations_per_thread,
     const char* label)
 {
-    constexpr uint64_t capacity = 32;
+    constexpr uint64_t initial_capacity = 32;
+    constexpr uint64_t max_capacity = 128;
+    ScopedMapMaxCapacity scoped_max_capacity(max_capacity);
     std::vector<Kmer> hot_keys;
     for (uint64_t i = 0; i < 8; ++i)
     {
@@ -358,7 +440,7 @@ bool test_mixed_workload(ConcurrentMemoryPool& pool,
         }
     }
 
-    Map map(capacity);
+    Map map(initial_capacity);
     std::vector<uint64_t> local_counts;
     run_parallel(map, pool, operations, local_counts);
     uint64_t unique_count = 0;
@@ -372,14 +454,17 @@ bool test_mixed_workload(ConcurrentMemoryPool& pool,
                   << ", got " << unique_count << "\n";
         return false;
     }
-    return validate_map(map, expected, capacity, label);
+    return validate_map(map, expected, initial_capacity, max_capacity, label);
 }
 
 bool test_collision_and_fingerprint_boundaries()
 {
-    constexpr uint64_t capacity = 16;
+    constexpr uint64_t initial_capacity = 16;
+    constexpr uint64_t max_capacity = 64;
+    ScopedMapMaxCapacity scoped_max_capacity(max_capacity);
     uint64_t cursor = 1;
-    std::vector<Kmer> keys = find_keys_for_slot(capacity, capacity - 1, 20, cursor);
+    std::vector<Kmer> keys = find_keys_for_slot(
+        initial_capacity, initial_capacity - 1, 20, cursor);
     if (keys.size() != 20)
     {
         std::cerr << "collision: could not generate enough colliding keys\n";
@@ -424,7 +509,7 @@ bool test_collision_and_fingerprint_boundaries()
         return false;
     }
 
-    Map map(capacity);
+    Map map(initial_capacity);
     Counts expected;
     uint64_t local_count = 0;
     for (const Kmer& key : keys)
@@ -433,7 +518,11 @@ bool test_collision_and_fingerprint_boundaries()
     }
     insert_one(map, { fingerprint_80, 7 }, local_count, expected);
     insert_one(map, { same_fingerprint, 11 }, local_count, expected);
-    return validate_map(map, expected, capacity, "collision and fingerprint");
+    return validate_map(map,
+        expected,
+        initial_capacity,
+        max_capacity,
+        "collision and fingerprint");
 }
 
 enum class HookMode
@@ -543,6 +632,7 @@ void race_hook(Map::DebugEvent event, const Map*, const Kmer& key)
 bool test_sealed_fast_path_race(ConcurrentMemoryPool& pool)
 {
     constexpr uint64_t capacity = 8;
+    ScopedMapMaxCapacity scoped_max_capacity(capacity);
     uint64_t cursor = 2'000'000;
     std::vector<Kmer> keys;
     for (uint64_t slot = 0; slot <= 6; ++slot)
@@ -657,12 +747,13 @@ bool test_sealed_fast_path_race(ConcurrentMemoryPool& pool)
         std::cerr << "sealed race: local_count mismatch\n";
         return false;
     }
-    return validate_map(map, expected, capacity, "sealed fast-path race");
+    return validate_map(map, expected, capacity, capacity, "sealed fast-path race");
 }
 
 bool test_post_cas_sealed_race(ConcurrentMemoryPool& pool)
 {
     constexpr uint64_t capacity = 8;
+    ScopedMapMaxCapacity scoped_max_capacity(capacity);
     uint64_t cursor = 4'000'000;
     std::vector<Kmer> keys;
     for (uint64_t slot = 0; slot < capacity; ++slot)
@@ -727,12 +818,12 @@ bool test_post_cas_sealed_race(ConcurrentMemoryPool& pool)
         std::cerr << "post-CAS race: local_count mismatch\n";
         return false;
     }
-    return validate_map(map, expected, capacity, "post-CAS sealed race");
+    return validate_map(map, expected, capacity, capacity, "post-CAS sealed race");
 }
 
 bool run_correctness_suite(ConcurrentMemoryPool& pool)
 {
-    if (!test_empty_and_segment_boundaries()) return false;
+    if (!test_growth_boundaries_and_old_key_updates()) return false;
     if (!test_hot_key(pool)) return false;
     if (!test_mixed_workload(pool, 0x1234ULL, 8, 2'000, "mixed workload")) return false;
     if (!test_collision_and_fingerprint_boundaries()) return false;
@@ -760,7 +851,8 @@ struct BenchmarkConfig
 {
     size_t threads = std::max(1U, std::thread::hardware_concurrency());
     size_t operations_per_thread = 100'000;
-    uint64_t capacity = 1024;
+    uint64_t initial_capacity = 1024;
+    uint64_t max_capacity = 1024;
     double duplicate_ratio = 0.75;
     size_t repetitions = 3;
 };
@@ -785,6 +877,7 @@ bool parse_double(const char* text, double& value)
 
 bool parse_benchmark_config(int argc, char** argv, BenchmarkConfig& cfg)
 {
+    bool max_capacity_provided = false;
     for (int i = 2; i < argc; i += 2)
     {
         if (i + 1 >= argc)
@@ -803,7 +896,12 @@ bool parse_benchmark_config(int argc, char** argv, BenchmarkConfig& cfg)
         }
         else if (option == "--capacity" && parse_u64(argv[i + 1], integer_value))
         {
-            cfg.capacity = integer_value;
+            cfg.initial_capacity = integer_value;
+        }
+        else if (option == "--max-capacity" && parse_u64(argv[i + 1], integer_value))
+        {
+            cfg.max_capacity = integer_value;
+            max_capacity_provided = true;
         }
         else if (option == "--duplicate-ratio" && parse_double(argv[i + 1], cfg.duplicate_ratio))
         {
@@ -817,13 +915,22 @@ bool parse_benchmark_config(int argc, char** argv, BenchmarkConfig& cfg)
             return false;
         }
     }
+    if (!max_capacity_provided)
+    {
+        cfg.max_capacity = cfg.initial_capacity;
+    }
     return cfg.threads > 0 && cfg.operations_per_thread > 0 && cfg.repetitions > 0 &&
-        cfg.capacity >= 4 && (cfg.capacity & (cfg.capacity - 1)) == 0 &&
+        cfg.initial_capacity >= 8 &&
+        (cfg.initial_capacity & (cfg.initial_capacity - 1)) == 0 &&
+        cfg.max_capacity >= 8 &&
+        (cfg.max_capacity & (cfg.max_capacity - 1)) == 0 &&
+        cfg.initial_capacity <= cfg.max_capacity &&
         cfg.duplicate_ratio >= 0.0 && cfg.duplicate_ratio <= 1.0;
 }
 
 bool run_benchmark(ConcurrentMemoryPool& pool, const BenchmarkConfig& cfg)
 {
+    ScopedMapMaxCapacity scoped_max_capacity(cfg.max_capacity);
     std::vector<Kmer> hot_keys;
     for (uint64_t i = 0; i < 64; ++i)
     {
@@ -865,17 +972,22 @@ bool run_benchmark(ConcurrentMemoryPool& pool, const BenchmarkConfig& cfg)
         warmup_operations[t].assign(operations[t].begin(), operations[t].begin() + warmup_count);
     }
     {
-        Map warmup_map(cfg.capacity);
+        Map warmup_map(cfg.initial_capacity);
         std::vector<uint64_t> warmup_local_counts;
         run_parallel(warmup_map, pool, warmup_operations, warmup_local_counts);
     }
 
     for (size_t repetition = 0; repetition < cfg.repetitions; ++repetition)
     {
-        Map map(cfg.capacity);
+        Map map(cfg.initial_capacity);
         std::vector<uint64_t> local_counts;
         const long long elapsed_ns = run_parallel(map, pool, operations, local_counts);
-        if (elapsed_ns <= 0 || !validate_map(map, expected, cfg.capacity, "benchmark validation"))
+        if (elapsed_ns <= 0 ||
+            !validate_map(map,
+                expected,
+                cfg.initial_capacity,
+                cfg.max_capacity,
+                "benchmark validation"))
         {
             return false;
         }
@@ -895,7 +1007,8 @@ bool run_benchmark(ConcurrentMemoryPool& pool, const BenchmarkConfig& cfg)
               << " ops_per_thread=" << cfg.operations_per_thread
               << " total_ops=" << static_cast<uint64_t>(total_operations)
               << " duplicate_ratio=" << cfg.duplicate_ratio
-              << " capacity=" << cfg.capacity
+              << " initial_capacity=" << cfg.initial_capacity
+              << " max_capacity=" << cfg.max_capacity
               << " unique_keys=" << expected.size()
               << " segments=" << final_segment_count << "\n"
               << "median_mops=" << median / 1'000'000.0
@@ -919,6 +1032,7 @@ int main(int argc, char** argv)
         {
             std::cerr << "Usage: " << argv[0]
                       << " --benchmark [--threads N] [--ops N] [--capacity N]"
+                      << " [--max-capacity N]"
                       << " [--duplicate-ratio R] [--repetitions N]\n";
             return 2;
         }

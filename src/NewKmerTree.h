@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <array>
 #include <mutex>
+#include <map>
 
 template <uint32_t N>
 struct node
@@ -483,8 +484,8 @@ private:
     void insert_kmer_in_task_to_node_hash_map_with_local_hash_map(const Task<N>& current_task)
     {
         node<N>* parent = current_task.current_node;
-        const uint64_t root_prefix = get_root_prefix(current_task.kmer_blocks[0]->k_mers[0]);
-        ConcurrentOpenAddressHashMap<N>* hash_map = ensure_hash_map(parent, concurrent_map_capacity[root_prefix]);
+        // const uint64_t root_prefix = get_root_prefix(current_task.kmer_blocks[0]->k_mers[0]);
+        ConcurrentOpenAddressHashMap<N>* hash_map = ensure_hash_map(parent, concurrent_hash_map_min_capacity);
 
         if (hash_map == nullptr) [[unlikely]]
         {
@@ -513,8 +514,8 @@ private:
     void insert_kmer_in_task_to_node_hash_map_without_local_hash_map(const Task<N>& current_task)
     {
         node<N>* parent = current_task.current_node;
-        const uint64_t root_prefix = get_root_prefix(current_task.kmer_blocks[0]->k_mers[0]);
-        ConcurrentOpenAddressHashMap<N>* hash_map = ensure_hash_map(parent, concurrent_map_capacity[root_prefix]);
+        // const uint64_t root_prefix = get_root_prefix(current_task.kmer_blocks[0]->k_mers[0]);
+        ConcurrentOpenAddressHashMap<N>* hash_map = ensure_hash_map(parent, concurrent_hash_map_min_capacity);
 
         if (hash_map == nullptr) [[unlikely]]
         {
@@ -1255,7 +1256,7 @@ private:
         return nullptr;  // 超时，返回 nullptr
     }
 
-    [[nodiscard]] ConcurrentOpenAddressHashMap<N>* ensure_hash_map(node<N>* parent, uint64_t capacity)
+    [[nodiscard]] ConcurrentOpenAddressHashMap<N>* ensure_hash_map(node<N>* parent, const uint64_t capacity)
     {
         ConcurrentOpenAddressHashMap<N>* hash_map = parent->hash_map.load(std::memory_order_acquire);
         ConcurrentOpenAddressHashMap<N>* CONSTRUCTING = reinterpret_cast<ConcurrentOpenAddressHashMap<N> *>(MAGIC_POINTER);
@@ -1395,6 +1396,9 @@ private:
             {
                 append_export_record(writer, key, count);
             });
+#ifdef TEST_MODE
+        hash_map->count_to_histogram();
+#endif
     }
 
     void ensure_spare_block()

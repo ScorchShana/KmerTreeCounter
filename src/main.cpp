@@ -152,69 +152,69 @@ void calculate_bloom_filter_capacity(std::vector<std::atomic<uint32_t>>& prefix_
 #endif
 }
 
-void calculate_concurrent_map_capacity(
-    const std::vector<std::atomic<uint32_t>>& prefix_counts)
-{
-    const uint64_t max_cap = kmer_concurrent_hash_map_capacity;
-    const uint64_t min_cap = 4096ULL;
-    const uint64_t mid_cap = std::max<uint64_t>(min_cap, max_cap / 2ULL);
+// void calculate_concurrent_map_capacity(
+//     const std::vector<std::atomic<uint32_t>>& prefix_counts)
+// {
+//     const uint64_t max_cap = kmer_concurrent_hash_map_capacity;
+//     const uint64_t min_cap = 4096ULL;
+//     const uint64_t mid_cap = std::max<uint64_t>(min_cap, max_cap / 2ULL);
 
-    std::array<uint64_t, 256> sorted;
-    for (size_t i = 0; i < prefix_counts.size(); ++i) {
-        sorted[i] = prefix_counts[i].load(std::memory_order_relaxed);
-    }
-    std::sort(sorted.begin(), sorted.end());
+//     std::array<uint64_t, 256> sorted;
+//     for (size_t i = 0; i < prefix_counts.size(); ++i) {
+//         sorted[i] = prefix_counts[i].load(std::memory_order_relaxed);
+//     }
+//     std::sort(sorted.begin(), sorted.end());
 
-    const uint64_t p30 = sorted[77];
-    const uint64_t p85 = sorted[218];
+//     const uint64_t p30 = sorted[77];
+//     const uint64_t p85 = sorted[218];
 
-    const double warm_low = static_cast<double>(p30);
-    const double warm_high = static_cast<double>(p85);
-    const double warm_range = warm_high - warm_low;
+//     const double warm_low = static_cast<double>(p30);
+//     const double warm_high = static_cast<double>(p85);
+//     const double warm_range = warm_high - warm_low;
 
-#ifdef TEST_MODE
-    uint64_t cold_cnt = 0, warm_cnt = 0, hot_cnt = 0;
-#endif
+// #ifdef TEST_MODE
+//     uint64_t cold_cnt = 0, warm_cnt = 0, hot_cnt = 0;
+// #endif
 
-    for (size_t i = 0; i < concurrent_map_capacity.size(); ++i) {
-        const uint64_t count = prefix_counts[i].load(std::memory_order_relaxed);
-        uint64_t cap;
+//     for (size_t i = 0; i < concurrent_map_capacity.size(); ++i) {
+//         const uint64_t count = prefix_counts[i].load(std::memory_order_relaxed);
+//         uint64_t cap;
 
-        if (count < p30) {
-            cap = min_cap;
-#ifdef TEST_MODE
-            cold_cnt++;
-#endif
-        }
-        else if (count < p85) {
-            double t = (warm_range > 0.0)
-                ? (static_cast<double>(count) - warm_low) / warm_range
-                : 0.0;
-            cap = min_cap + static_cast<uint64_t>((mid_cap - min_cap) * t);
-#ifdef TEST_MODE
-            warm_cnt++;
-#endif
-        }
-        else {
-            cap = max_cap;
-#ifdef TEST_MODE
-            hot_cnt++;
-#endif
-        }
+//         if (count < p30) {
+//             cap = min_cap;
+// #ifdef TEST_MODE
+//             cold_cnt++;
+// #endif
+//         }
+//         else if (count < p85) {
+//             double t = (warm_range > 0.0)
+//                 ? (static_cast<double>(count) - warm_low) / warm_range
+//                 : 0.0;
+//             cap = min_cap + static_cast<uint64_t>((mid_cap - min_cap) * t);
+// #ifdef TEST_MODE
+//             warm_cnt++;
+// #endif
+//         }
+//         else {
+//             cap = max_cap;
+// #ifdef TEST_MODE
+//             hot_cnt++;
+// #endif
+//         }
 
-        cap = std::max(min_cap, std::bit_ceil(cap));
-        concurrent_map_capacity[i] = cap;
-    }
+//         cap = std::max(min_cap, std::bit_ceil(cap));
+//         concurrent_map_capacity[i] = cap;
+//     }
 
-#ifdef TEST_MODE
-    std::cout << "--- Hash Map Capacity Allocation ---" << std::endl;
-    std::cout << "  P30 (cold/warm): " << p30 << std::endl;
-    std::cout << "  P85 (warm/hot):  " << p85 << std::endl;
-    std::cout << "  COLD: " << cold_cnt << " -> cap=" << min_cap << std::endl;
-    std::cout << "  WARM: " << warm_cnt << " -> linear " << min_cap << "->" << mid_cap << std::endl;
-    std::cout << "  HOT:  " << hot_cnt << " -> cap=" << max_cap << std::endl;
-#endif
-}
+// #ifdef TEST_MODE
+//     std::cout << "--- Hash Map Capacity Allocation ---" << std::endl;
+//     std::cout << "  P30 (cold/warm): " << p30 << std::endl;
+//     std::cout << "  P85 (warm/hot):  " << p85 << std::endl;
+//     std::cout << "  COLD: " << cold_cnt << " -> cap=" << min_cap << std::endl;
+//     std::cout << "  WARM: " << warm_cnt << " -> linear " << min_cap << "->" << mid_cap << std::endl;
+//     std::cout << "  HOT:  " << hot_cnt << " -> cap=" << max_cap << std::endl;
+// #endif
+// }
 
 void get_numa_nodes()
 {
@@ -380,7 +380,7 @@ int process_main()
     get_MAX_BLOOM_FILTER_CAPACITY();
     lpt(prefix_counts, classifier_num);
     calculate_bloom_filter_capacity(prefix_counts, estimated_file_size);
-    calculate_concurrent_map_capacity(prefix_counts);
+    // calculate_concurrent_map_capacity(prefix_counts);
 
     get_numa_nodes();
 
@@ -528,10 +528,10 @@ int process_main()
 int main(int argc, char* argv[])
 {
 
-    if (argc < 6 || argc > 10)
+    if (argc < 6 || argc > 9)
     {
         std::cerr << "Usage: " << argv[0]
-            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [filter_min=2] [filter_max=4294967295] [count_max=255]" << std::endl;
+            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [filter_min=2] [count_max=255]" << std::endl;
         return 1;
     }
 
@@ -585,7 +585,7 @@ int main(int argc, char* argv[])
 
         if (argc >= 7)
         {
-            kmer_concurrent_hash_map_capacity = std::max<uint32_t>(4096, std::bit_ceil(std::stoul(argv[6])));
+            concurrent_hash_map_max_capacity = std::max<uint64_t>(concurrent_hash_map_min_capacity, std::bit_ceil(std::stoul(argv[6])));
         }
         if (argc >= 8)
         {
@@ -593,11 +593,7 @@ int main(int argc, char* argv[])
         }
         if (argc >= 9)
         {
-            filter_max = std::stoul(argv[8]);
-        }
-        if (argc >= 10)
-        {
-            count_max = std::stoul(argv[9]);
+            count_max = std::stoul(argv[8]);
         }
 
         if (n_thread < 6)
@@ -613,22 +609,21 @@ int main(int argc, char* argv[])
         std::cout << "  k-mer length: " << k_len << std::endl;
         std::cout << "  Thread count: " << n_thread << std::endl;
         std::cout << "  Memory limit (GB): " << memory_limit << std::endl;
-        std::cout << "  Map capacity: " << kmer_concurrent_hash_map_capacity << std::endl;
+        std::cout << "  Map capacity: " << concurrent_hash_map_max_capacity << std::endl;
         std::cout << "  Filter min: " << filter_min << std::endl;
-        std::cout << "  Filter max: " << filter_max << std::endl;
         std::cout << "  Count max: " << count_max << std::endl;
     }
     catch (const std::exception&)
     {
         std::cerr << "Usage: " << argv[0]
-            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [filter_min] [filter_max] [count_max]" << std::endl;
+            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [filter_min] [count_max]" << std::endl;
         return 1;
     }
 
-    if (kmer_concurrent_hash_map_capacity <= 1 || filter_max < filter_min || count_max == 0)
+    if (concurrent_hash_map_max_capacity <= 1 || concurrent_hash_map_min_capacity > concurrent_hash_map_max_capacity || count_max == 0)
     {
         std::cerr << "Usage: " << argv[0]
-            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [filter_min] [filter_max] [count_max]" << std::endl;
+            << " <fastq_file> <k_len> <n_thread> <memory_limit_gb> <temp_dir> [map_capacity] [filter_min] [count_max]" << std::endl;
         return 1;
     }
 

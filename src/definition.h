@@ -125,8 +125,9 @@ inline uint32_t filter_max = std::numeric_limits<uint32_t>::max();
 inline uint32_t count_max = 255;
 inline uint32_t count_max_bytes = 1;
 
-// KmerTree的哈希表大小
-inline uint32_t kmer_concurrent_hash_map_capacity = 1024;
+// KmerTree的哈希表最大大小
+inline uint64_t concurrent_hash_map_max_capacity = 1024;
+inline uint64_t concurrent_hash_map_min_capacity = 1024;
 
 // FastqReader配置常量
 constexpr uint64_t FASTQ_FILE_CHUNK_SIZE = 2 * 1024 * 1024; // FASTQ 文件块大小（字节）
@@ -236,7 +237,7 @@ inline std::array<uint8_t, 1U << (2 * ROOT_BASES)> prefix_owners;
 inline std::array<void*, 1U << (2 * ROOT_BASES)> global_bloom_filter{};
 
 // prefix 对应的哈希表容量
-inline std::array<uint64_t, 1U << (2 * ROOT_BASES)> concurrent_map_capacity;
+// inline std::array<uint64_t, 1U << (2 * ROOT_BASES)> concurrent_map_capacity;
 
 inline uint8_t avgQuality = 0;
 
