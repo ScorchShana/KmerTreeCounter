@@ -180,3 +180,8 @@ target_link_libraries(benchmark_export_reader_test pthread)
 target_link_libraries(benchmark_export_reader_test rt)
 
 add_executable(test_and_benckmark_export_record_radix_sort tests/test_and_benckmark_export_record_radix_sort.cpp)
+
+add_executable(benchmark_gzip_streamer_test tests/benchmark_gzip_streamer.cpp)
+target_link_libraries(benchmark_gzip_streamer_test zlib)
+target_link_libraries(benchmark_gzip_streamer_test pthread)
+target_link_libraries(benchmark_gzip_streamer_test rt)
