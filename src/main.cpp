@@ -136,6 +136,7 @@ void calculate_bloom_filter_capacity(std::vector<std::atomic<uint32_t>>& prefix_
         bloom_filter_capacity[i] = std::min(bloom_filter_capacity[i], MAX_BLOOM_FILTER_CAPACITY);
         max_bloom_filter_capacity = std::max(max_bloom_filter_capacity, bloom_filter_capacity[i]);
 #ifdef TEST_MODE
+        std::cout << "Bloom filter " << i << " capacity: " << bloom_filter_capacity[i] << std::endl;
         total_bloom_filter_size += bloom_filter_capacity[i];
 #endif
     }

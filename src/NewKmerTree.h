@@ -114,6 +114,7 @@ public:
 #ifdef TEST_MODE
     alignas(CACHE_LINE_SIZE) std::atomic<long long> total_kmers_added{ 0 };
     static inline thread_local uint64_t classifier_wait_cycles = 0;
+    static inline thread_local uint32_t dealing_root_index = 0;
 #endif
 
     // 构造函数：初始化字典树相关组件
@@ -910,6 +911,11 @@ private:
 public:
     void final_drain_root(node<N>* root_node, FinalDrainWriter<N>& writer)
     {
+
+#ifdef TEST_MODE
+        dealing_root_index = root_node - root_nodes;
+#endif
+
         std::vector<DrainFrame> node_stack;
         std::vector<Task<N>> drain_stack;
 
@@ -1406,6 +1412,12 @@ private:
             });
 #ifdef TEST_MODE
         hash_map->count_to_histogram();
+        uint32_t segment_count = hash_map->get_segment_count();
+        if (segment_count > 7)
+        {
+            std::pair<uint64_t, uint64_t> kmer_infos = hash_map->get_kmer_infos();
+            std::cout << "Root : " << dealing_root_index << ", segment count: " << segment_count << ", singleton k-mers: " << kmer_infos.first << ", unique k-mers: " << kmer_infos.second << std::endl;
+        }
 #endif
     }
 

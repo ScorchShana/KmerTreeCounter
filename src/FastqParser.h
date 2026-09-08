@@ -640,10 +640,10 @@ private:
 
     void flush_kmer_buffer()
     {
+        // divide_kmer_buffer_into_owner_contents(kmer_buffer.data(), kmer_buffer_count);
         calculate_block_owner_counts(kmer_buffer.data(), kmer_buffer_count);
-        divide_kmer_buffer_into_owner_contents(kmer_buffer.data(), kmer_buffer_count);
-        // push_kmers_into_local_block_for_copy(kmer_buffer.data(), kmer_buffer_count);
-        // divide_kmers_into_owner_contents();
+        push_kmers_into_local_block_for_copy(kmer_buffer.data(), kmer_buffer_count);
+        divide_kmers_into_owner_contents();
         total_read_kmer += kmer_buffer_count;
         kmer_buffer_count = 0;
     }

@@ -12,6 +12,10 @@
 #include <cstring>
 #include <map>
 
+#ifdef TEST_MODE
+#include <utility>
+#endif
+
 template <uint32_t N>
 class ConcurrentOpenAddressHashMap
 {
@@ -161,7 +165,20 @@ public:
     }
 
 #ifdef TEST_MODE
-    void count_to_histogram() {
+    uint32_t get_segment_count()
+    {
+        const ConcurrentOpenAddressHashMap<N>* map = this;
+        uint32_t cnt = 0;
+        while (map != nullptr)
+        {
+            cnt++;
+            map = map->next_map.load(std::memory_order_acquire);
+        }
+        return cnt;
+    }
+
+    void count_to_histogram()
+    {
         const ConcurrentOpenAddressHashMap<N>* map = this;
         uint32_t cnt = 0;
         while (map != nullptr)
@@ -172,7 +189,30 @@ public:
         segment_histogram[cnt]++;
     }
 
-    static std::map<uint32_t, uint32_t> get_segment_histogram() {
+    std::pair<uint64_t, uint64_t> get_kmer_infos()
+    {
+        uint64_t singleton_kmers = 0;
+        uint64_t unique_kmers = 0;
+
+        const ConcurrentOpenAddressHashMap<N>* map = this;
+        while (map != nullptr)
+        {
+            for (uint64_t i = 0; i < map->capacity; ++i)
+            {
+                const uint8_t ctrl = map->ctrls[i].load(std::memory_order_acquire);
+                if ((ctrl & 0x80U) != 0) [[likely]]
+                {
+                    ++unique_kmers;
+                    singleton_kmers += (map->counts[i].load(std::memory_order_relaxed) > 1) ? 0 : 1;
+                }
+            }
+            map = map->next_map.load(std::memory_order_acquire);
+        }
+        return std::make_pair(singleton_kmers, unique_kmers);
+    }
+
+    static std::map<uint32_t, uint32_t> get_segment_histogram()
+    {
         return segment_histogram;
     }
 #endif
@@ -419,10 +459,12 @@ public:
                     else
                     {
                         // Build the next map
+                        uint32_t cur_segment_id = this->segment_id + 1;
                         ConcurrentOpenAddressHashMap<N>* new_map = reinterpret_cast<ConcurrentOpenAddressHashMap<N>*>(get_map_metadata_mem());
-                        uint64_t new_capacity = std::min<uint64_t>(capacity * 2, concurrent_hash_map_max_capacity); // Double the capacity for the next map
+                        uint64_t new_capacity = cur_segment_id > SEGMENT_WATERMARK ? capacity * 4 : capacity * 2;
+                        new_capacity = std::min<uint64_t>(new_capacity, concurrent_hash_map_max_capacity); // Double the capacity for the next map
                         new(new_map) ConcurrentOpenAddressHashMap<N>(new_capacity);
-                        new_map->segment_id = this->segment_id + 1;
+                        new_map->segment_id = cur_segment_id;
                         next_map.store(new_map, std::memory_order_release);
                         building_next.store(false, std::memory_order_release);
                         return new_map;
