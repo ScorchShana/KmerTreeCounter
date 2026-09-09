@@ -185,3 +185,8 @@ add_executable(benchmark_gzip_streamer_test tests/benchmark_gzip_streamer.cpp)
 target_link_libraries(benchmark_gzip_streamer_test zlib)
 target_link_libraries(benchmark_gzip_streamer_test pthread)
 target_link_libraries(benchmark_gzip_streamer_test rt)
+
+add_executable(benchmark_gzip_base_extraction_test tests/benchmark_gzip_base_extraction.cpp)
+target_link_libraries(benchmark_gzip_base_extraction_test zlib)
+target_link_libraries(benchmark_gzip_base_extraction_test pthread)
+target_link_libraries(benchmark_gzip_base_extraction_test rt)
