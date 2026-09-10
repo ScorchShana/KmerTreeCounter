@@ -45,6 +45,10 @@ constexpr size_t TLS_CAPACITY = 128;
 // 每个远程链表的最大长度
 constexpr size_t REMOTE_LIST_CAPACITY = 32;
 
+// NUMA 节点迁移检测间隔：每多少次从 Arena refill 才检测一次当前 NUMA 节点
+// 取值越大，NUMA 检测开销越低，但迁移后发现并纠正的延迟也越大
+constexpr uint32_t NUMA_REFILL_CHECK_INTERVAL = 8;
+
 // 大页大小（2MB）
 constexpr size_t HUGE_PAGE_SIZE = 2ULL * 1024 * 1024;
 
@@ -146,8 +150,12 @@ struct ThreadLocalCache
     // 所属的 ConcurrentMemoryPool 指针（用于归还内存）
     class ConcurrentMemoryPool* pool;
 
+    // refill 计数器，用于控制 NUMA 迁移检测频率
+    uint32_t refill_check_counter;
+
     ThreadLocalCache()
-        : local_free_stack(nullptr), local_free_count(0), local_arena(nullptr), local_arena_index(-1), pool(nullptr) {
+        : local_free_stack(nullptr), local_free_count(0), local_arena(nullptr), local_arena_index(-1),
+          pool(nullptr), refill_check_counter(0) {
     }
 
     // 析构时归还所有缓存
@@ -222,6 +230,11 @@ private:
 
     // 获取当前线程应该使用的 Arena 索引
     int get_thread_arena_index() const;
+
+    // 检测当前线程是否仍位于本地 Arena 对应的 NUMA 节点上。
+    // 若线程已迁移或 TLS 尚未初始化，会刷新/初始化本地缓存并切换 Arena。
+    // 返回值：true 表示本地空闲栈已被清空/刚初始化，调用方可以考虑一次性补充较多块。
+    bool ensure_thread_arena_affinity();
 
     // 构建按 NUMA 距离排序的候选 Arena 索引列表（用于本地 Arena 耗尽时窃取）
     inline void build_numa_distance_order();
@@ -977,6 +990,54 @@ inline int ConcurrentMemoryPool::get_thread_arena_index() const
     return 0;
 }
 
+inline bool ConcurrentMemoryPool::ensure_thread_arena_affinity()
+{
+    ThreadLocalCache& tls = tls_cache_;
+    const int current_arena = get_thread_arena_index();
+
+    // 首次访问：初始化 TLS 并绑定到当前 NUMA 节点
+    if (!tls.pool) [[unlikely]]
+    {
+        tls.pool = this;
+        tls.local_arena_index = current_arena;
+        tls.local_arena = &arenas_[current_arena];
+        tls.local_free_stack = nullptr;
+        tls.local_free_count = 0;
+        return true;
+    }
+
+    // 未发生迁移，保持现状
+    if (current_arena == tls.local_arena_index) [[likely]]
+    {
+        return false;
+    }
+
+    // 线程已迁移到其它 NUMA 节点：把本地缓存中属于旧 Arena 的块批量归还
+    if (tls.local_free_stack)
+    {
+        FreeBlock* head = tls.local_free_stack;
+        FreeBlock* tail = head;
+        size_t count = 1;
+        while (tail->next)
+        {
+            tail = tail->next;
+            ++count;
+        }
+
+        batch_deallocate_to_arena(*tls.local_arena, head, tail, count);
+
+        tls.local_free_stack = nullptr;
+        tls.local_free_count = 0;
+    }
+
+    // 切换到新的本地 Arena
+    tls.local_arena_index = current_arena;
+    tls.local_arena = &arenas_[current_arena];
+    tls.pool = this;
+
+    return true;
+}
+
 inline ThreadLocalCache& ConcurrentMemoryPool::get_thread_local_cache()
 {
     return tls_cache_;
@@ -993,13 +1054,8 @@ inline void* ConcurrentMemoryPool::allocate_large(size_t bytes)
 
     ThreadLocalCache& tls = tls_cache_;
 
-    // 初始化 TLS（首次访问）
-    if (!tls.pool) [[unlikely]]
-    {
-        tls.pool = this;
-        tls.local_arena_index = get_thread_arena_index();
-        tls.local_arena = &arenas_[tls.local_arena_index];
-    }
+    // 确保线程仍位于本地 Arena 对应的 NUMA 节点上，必要时切换 Arena
+    ensure_thread_arena_affinity();
 
     char* ptr = bump_allocate_from_arena(*tls.local_arena, bytes);
     if (ptr) [[likely]]
@@ -1038,29 +1094,34 @@ inline void* ConcurrentMemoryPool::allocate()
     FreeBlock* head, * tail;
     size_t fetched = 0;
 
-    // 初始化 TLS（首次访问）
+    // 1. 尝试从本地空闲栈分配（热路径：零 NUMA 检测开销）
+    if (tls.local_free_stack) [[likely]]
+    {
+        FreeBlock* block = tls.local_free_stack;
+        tls.local_free_stack = block->next;
+        tls.local_free_count--;
+
+        return block;
+    }
+
+    // 2. 本地栈为空，进入 refill 慢路径。
+    // 为了降低 NUMA 检测开销，每隔 NUMA_REFILL_CHECK_INTERVAL 次 refill 才真正检测一次 NUMA 节点。
+    bool needs_full_refill = false;
     if (!tls.pool) [[unlikely]]
     {
-        tls.pool = this;
-        tls.local_arena_index = get_thread_arena_index();
-        tls.local_arena = &arenas_[tls.local_arena_index];
-        fetched = batch_allocate_from_arena(*tls.local_arena, &head, &tail, TLS_CAPACITY);
+        // 首次访问：必须初始化 TLS 并绑定到当前 NUMA 节点
+        needs_full_refill = ensure_thread_arena_affinity();
     }
-    else
+    else if (++tls.refill_check_counter >= NUMA_REFILL_CHECK_INTERVAL)
     {
-        // 1. 尝试从本地空闲栈分配
-        if (tls.local_free_stack) [[likely]]
-        {
-            FreeBlock* block = tls.local_free_stack;
-            tls.local_free_stack = block->next;
-            tls.local_free_count--;
-
-            return block;
-        }
-        fetched = batch_allocate_from_arena(*tls.local_arena, &head, &tail, BATCH_SIZE);
+        tls.refill_check_counter = 0;
+        needs_full_refill = ensure_thread_arena_affinity();
     }
 
-    // 2. 本地栈为空，从本地 Arena 批量获取
+    fetched = batch_allocate_from_arena(*tls.local_arena, &head, &tail,
+                                        needs_full_refill ? TLS_CAPACITY : BATCH_SIZE);
+
+    // 3. 成功从本地 Arena 批量获取到块
     if (fetched > 0)
     {
         // 第一个块立即返回
@@ -1074,7 +1135,7 @@ inline void* ConcurrentMemoryPool::allocate()
         return result;
     }
 
-    // 3. 本地 Arena 为空，尝试按 NUMA 距离顺序跨 Arena 窃取
+    // 4. 本地 Arena 为空，尝试按 NUMA 距离顺序跨 Arena 窃取
     for (int i = 0; i < num_arenas_; ++i)
     {
         int candidate = numa_distance_order_[tls.local_arena_index][i];
@@ -1095,7 +1156,7 @@ inline void* ConcurrentMemoryPool::allocate()
         }
     }
 
-    // 4. 所有 Arena 都为空
+    // 5. 所有 Arena 都为空
     std::cerr << "std::bad_alloc" << std::endl;
     std::exit(-1);
 }
@@ -1113,12 +1174,11 @@ inline void ConcurrentMemoryPool::deallocate(void* ptr)
 
     ThreadLocalCache& tls = tls_cache_;
 
-    // 初始化 TLS（首次访问）
-    if (!tls.pool)
+    // deallocate 只做一次 TLS 初始化（如果需要），不主动检测 NUMA 迁移。
+    // 迁移纠正留给下一次 allocate() 的 refill 路径处理。
+    if (!tls.pool) [[unlikely]]
     {
-        tls.pool = this;
-        tls.local_arena_index = get_thread_arena_index();
-        tls.local_arena = &arenas_[tls.local_arena_index];
+        ensure_thread_arena_affinity();
     }
 
     FreeBlock* block = reinterpret_cast<FreeBlock*>(ptr);
