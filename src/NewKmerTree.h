@@ -501,7 +501,8 @@ private:
         }
 
         uint64_t hash_map_capacity = std::bit_ceil(thread_local_counting_hash_map.size() * 5 / 4);
-        hash_map_capacity = std::max<uint64_t>(hash_map_capacity, 1024);
+        hash_map_capacity = std::max<uint64_t>(hash_map_capacity, concurrent_hash_map_min_capacity);
+        hash_map_capacity = std::min<uint64_t>(hash_map_capacity, concurrent_hash_map_max_capacity);
         ConcurrentOpenAddressHashMap<N>* hash_map = ensure_hash_map(parent, hash_map_capacity);
 
         if (hash_map == nullptr) [[unlikely]]
@@ -944,7 +945,7 @@ public:
                         task.depth = frame.depth;
                         task.count = current->count;
                         task.kmer_blocks = current->kmer_blocks;
-                        insert_kmer_in_task_to_node_hash_map_without_local_hash_map(task);
+                        insert_kmer_in_task_to_node_hash_map_with_local_hash_map(task);
                         current->count = 0;
                         current->active_block = nullptr;
                         export_hash_map(writer, hash_map);

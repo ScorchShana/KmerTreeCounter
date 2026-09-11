@@ -47,7 +47,7 @@ void get_MAX_BLOOM_FILTER_CAPACITY()
     const uint64_t quarter_memory_average_capacity = memory_limit * 1024ULL * 1024ULL * 1024ULL / 4 / sizeof(uint64_t) / (1ULL << (2 * ROOT_BASES));
     const double singleton_rate_cause_by_error = 1.0 - std::pow(1.0 - error_rate, k_len);
     const double error_factor = 0.5 + singleton_rate_cause_by_error;
-    const auto corrected_memory_average_capacity = std::bit_ceil(static_cast<uint64_t>(static_cast<double>(quarter_memory_average_capacity) * error_factor));
+    const auto corrected_memory_average_capacity = std::bit_floor(static_cast<uint64_t>(static_cast<double>(quarter_memory_average_capacity) * error_factor));
     MAX_BLOOM_FILTER_CAPACITY = std::max<uint64_t>(MIN_BLOOM_FILTER_CAPACITY, corrected_memory_average_capacity);
 }
 
@@ -109,7 +109,11 @@ void calculate_bloom_filter_capacity(std::vector<std::atomic<uint32_t>>& prefix_
     const double error_rate = std::pow(10.0, -(avgQuality - 33) * 0.1);
     const uint64_t quarter_memory_average_capacity = memory_limit * 1024ULL * 1024ULL * 1024ULL / 4 / sizeof(uint64_t) / (1ULL << (2 * ROOT_BASES));
     const double singleton_rate_cause_by_error = 1.0 - std::pow(1.0 - error_rate, k_len);
-    const double capacity_error_factor = std::min(0.5 + singleton_rate_cause_by_error, 1.0);
+    const double capacity_error_factor = 0.5 + singleton_rate_cause_by_error;
+    uint64_t bloom_filter_memroy_budget = static_cast<uint64_t>(memory_limit * 1024ULL * 1024ULL * 1024ULL / 4 * capacity_error_factor);
+
+    std::array<uint64_t, 1ULL << (2 * ROOT_BASES)> expected_bloom_filter_capacity;
+    std::array<double, 1ULL << (2 * ROOT_BASES)> prefix_ratios;
 
 #ifdef TEST_MODE
     std::cout << "Estimated total k-mers: " << estimated_total_kmers << std::endl;
@@ -131,9 +135,69 @@ void calculate_bloom_filter_capacity(std::vector<std::atomic<uint32_t>>& prefix_
     for (uint64_t i = 0; i < bloom_filter_capacity.size(); i++)
     {
         double prefix_ratio = static_cast<double>(prefix_counts[i].load(std::memory_order_relaxed)) / total_prefix_count;
-        const uint64_t estimated_capacity = static_cast<uint64_t>(estimated_total_kmers * prefix_ratio * 4.81 * capacity_error_factor / 64);
+        const uint64_t estimated_capacity = static_cast<uint64_t>(estimated_total_kmers * prefix_ratio * 4.81 * (sizeof(std::atomic<uint64_t>)) / 8 * capacity_error_factor / 64);
+        prefix_ratios[i] = prefix_ratio;
+        expected_bloom_filter_capacity[i] = estimated_capacity;
         bloom_filter_capacity[i] = std::max(std::bit_ceil(estimated_capacity), MIN_BLOOM_FILTER_CAPACITY);
         bloom_filter_capacity[i] = std::min(bloom_filter_capacity[i], MAX_BLOOM_FILTER_CAPACITY);
+        bloom_filter_memroy_budget -= sizeof(std::atomic<uint64_t>) * bloom_filter_capacity[i];
+    }
+
+    // 贪心增大布隆过滤器
+    auto cmp = [&](const uint32_t& a, const uint32_t& b) {
+        uint64_t val_a = 0;
+        if (bloom_filter_capacity[a] < expected_bloom_filter_capacity[a])
+        {
+            val_a = std::min(expected_bloom_filter_capacity[a] - bloom_filter_capacity[a],
+                bloom_filter_capacity[a]);
+        }
+        uint64_t val_b = 0;
+        if (bloom_filter_capacity[b] < expected_bloom_filter_capacity[b])
+        {
+            val_b = std::min(expected_bloom_filter_capacity[b] - bloom_filter_capacity[b],
+                bloom_filter_capacity[b]);
+        };
+
+        __uint128_t val_a_per_byte = val_a * static_cast<__uint128_t>(bloom_filter_capacity[b]);
+        __uint128_t val_b_per_byte = val_b * static_cast<__uint128_t>(bloom_filter_capacity[a]);
+
+        if (val_a_per_byte == val_b_per_byte)
+        {
+            return prefix_ratios[a] < prefix_ratios[b];
+        }
+        else
+        {
+            return val_a_per_byte < val_b_per_byte;
+        }
+        };
+
+    std::priority_queue<uint32_t, std::vector<uint32_t>, decltype(cmp)>q(cmp);
+
+    for (uint32_t i = 0; i < bloom_filter_capacity.size(); i++)
+    {
+        q.push(i);
+    }
+
+    const uint64_t final_max_bloom_filter_capacity = MAX_BLOOM_FILTER_CAPACITY * 4;
+    while (!q.empty()) {
+        uint32_t i = q.top();
+        q.pop();
+        if (bloom_filter_capacity[i] < expected_bloom_filter_capacity[i])
+        {
+            uint64_t increase_size = bloom_filter_capacity[i];
+            uint64_t increase_memory = sizeof(std::atomic<uint64_t>) * increase_size;
+            if (bloom_filter_memroy_budget >= increase_memory && bloom_filter_capacity[i] * 2 <= final_max_bloom_filter_capacity)
+            {
+                bloom_filter_capacity[i] *= 2;
+                bloom_filter_memroy_budget -= increase_memory;
+                q.push(i);
+            }
+        }
+    }
+
+
+    for (uint64_t i = 0; i < bloom_filter_capacity.size(); i++)
+    {
         max_bloom_filter_capacity = std::max(max_bloom_filter_capacity, bloom_filter_capacity[i]);
 #ifdef TEST_MODE
         std::cout << "Bloom filter " << i << " capacity: " << bloom_filter_capacity[i] << std::endl;
