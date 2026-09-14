@@ -242,7 +242,12 @@ private:
 
     bool are_all_depth_queues_empty() const
     {
-        return layer_queues_ptr_->size() == 0;
+        for (uint32_t depth = 0; depth < MAX_DEPTH; ++depth)
+        {
+            if (layer_queues_ptr_->size(depth) != 0)
+                return false;
+        }
+        return true;
     }
 
     void drain_all(const uint32_t start_depth)
@@ -252,14 +257,22 @@ private:
 
         while (stable_empty_rounds < DRAIN_EMPTY_CONFIRM_ROUNDS)
         {
+            uint32_t local_decrease_count = 0;
             for (uint32_t k = 0; k < MAX_DEPTH; k++)
             {
                 uint32_t depth = (k + start_depth) % MAX_DEPTH;
-                auto queue = layer_queues_ptr_->get_queue(static_cast<uint32_t>(depth));
+                auto queue = layer_queues_ptr_->get_queue(depth);
                 while (queue->try_dequeue(task))
                 {
-                    layer_queues_ptr_->decrease_size();
                     tree_ptr_->thread_add_kmer(task);
+                    ++local_decrease_count;
+
+                }
+
+                if (local_decrease_count > 0)
+                {
+                    layer_queues_ptr_->decrease_size(depth, local_decrease_count);
+                    local_decrease_count = 0;
                 }
             }
 
@@ -285,8 +298,12 @@ private:
         while (processed < max_process_tasks && queue->try_dequeue(task))
         {
             tree_ptr_->thread_add_kmer(task);
-            layer_queues_ptr_->decrease_size();
             processed++;
+        }
+
+        if (processed > 0)
+        {
+            layer_queues_ptr_->decrease_size(depth, processed);
         }
 
 #ifdef TEST_MODE
@@ -306,7 +323,7 @@ private:
             if (queue->try_dequeue(task))
             {
                 tree_ptr_->thread_add_kmer(task);
-                layer_queues_ptr_->decrease_size();
+                layer_queues_ptr_->decrease_size(static_cast<uint32_t>(steal_depth));
 
 #ifdef TEST_MODE
                 ++steal_tasks;
@@ -435,7 +452,7 @@ private:
         {
 
 #ifdef TEST_MODE
-            if (first_flag && layer_queues_ptr_->size() > 0) {
+            if (first_flag && !are_all_depth_queues_empty()) {
                 ++backoff_time_with_tasks;
             }
 #endif
@@ -657,7 +674,8 @@ private:
 
         for (uint32_t d = 0; d < MAX_DEPTH; ++d)
         {
-            uint64_t qsize = layer_queues_ptr_->get_queue(d)->size();
+            const int64_t tracked_size = layer_queues_ptr_->size(d);
+            uint64_t qsize = tracked_size > 0 ? static_cast<uint64_t>(tracked_size) : 0;
 
             const double corrected_depth_cycles_per_task = depth_cycles_per_task[d] * depth_cycles_per_task_corrected_factor;
             const double raw = static_cast<double>(qsize) * corrected_depth_cycles_per_task;

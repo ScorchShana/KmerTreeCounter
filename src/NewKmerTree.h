@@ -206,8 +206,8 @@ public:
         if (has_deferred_task)
         {
             auto queue_ptr = layer_queue_->get_queue(0);
+            layer_queue_->increase_size(0);
             queue_ptr->enqueue(deferred_task);
-            layer_queue_->increase_size();
         }
     }
 
@@ -313,8 +313,8 @@ public:
                         uint64_t start_cycles = __rdtsc();
 #endif
 
+                        layer_queue_->increase_size(0);
                         queue_ptr->enqueue(task);
-                        layer_queue_->increase_size();
 
 #ifdef TEST_MODE
                         uint64_t end_cycles = __rdtsc();
@@ -390,6 +390,7 @@ public:
                     uint64_t start_cycles = __rdtsc();
 #endif
 
+                    layer_queue_->increase_size(0);
                     if (queue_ptr->try_enqueue(task))
                     {
                         classifier_enqueue_spin_backoff.reset();
@@ -403,7 +404,6 @@ public:
                         }
                         classifier_enqueue_spin_backoff.decay();
                     }
-                    layer_queue_->increase_size();
 
 #ifdef TEST_MODE
                     uint64_t end_cycles = __rdtsc();
@@ -1131,7 +1131,7 @@ private:
                 auto queue_ptr = layer_queue_->get_queue(current_depth + 1);
                 uint32_t retry_count = 0;
                 thread_local_spin_backoff.reset();
-                layer_queue_->increase_size();
+                layer_queue_->increase_size(current_depth + 1);
                 while (!queue_ptr->try_enqueue(task))
                 {
                     retry_count++;
@@ -1139,7 +1139,7 @@ private:
                     {
                         // 入队失败过多次，直接放到本地栈，后续由工作线程自己处理
                         thread_local_task_stack.push_back(task);
-                        layer_queue_->decrease_size();
+                        layer_queue_->decrease_size(current_depth + 1);
                         break;
                     }
                     thread_local_spin_backoff.backoff();
