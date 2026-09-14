@@ -56,6 +56,8 @@ public:
 
 #ifdef TEST_MODE
     inline static thread_local std::map<uint32_t, uint32_t> segment_histogram;
+    inline static thread_local uint64_t segment_probe = 0;
+    inline static thread_local uint64_t segment_probe_time = 0;
 #endif 
 
     enum class InsertResult
@@ -354,8 +356,15 @@ public:
 
         ConcurrentOpenAddressHashMap<N>* map_ptr = this;
 
+#ifdef TEST_MODE
+        ++segment_probe_time;
+#endif
+
         for (;;)
         {
+#ifdef TEST_MODE
+            ++segment_probe;
+#endif
             InsertResult res = map_ptr->try_increment(h, key, fp, value, local_count);
             if (res == InsertResult::FULL)
             {

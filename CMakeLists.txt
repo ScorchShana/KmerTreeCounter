@@ -122,6 +122,13 @@ if(HAVE_NUMA_H)
 endif()
 add_test(NAME ExportReaderTest COMMAND export_reader_test)
 
+add_executable(reader_thread_pool_test tests/test_reader_thread_pool.cpp)
+target_link_libraries(reader_thread_pool_test zlib rt pthread atomic)
+if(HAVE_NUMA_H)
+    target_link_libraries(reader_thread_pool_test numa)
+endif()
+add_test(NAME ReaderThreadPoolTest COMMAND reader_thread_pool_test)
+
 add_executable(final_drain_reader_test tests/test_final_drain_reader.cpp)
 target_link_libraries(final_drain_reader_test rt)
 target_link_libraries(final_drain_reader_test pthread)

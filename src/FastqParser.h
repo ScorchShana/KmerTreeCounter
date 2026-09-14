@@ -122,7 +122,7 @@ public:
                     not_first_flag = true;
 #endif
 
-                    dequeue_backoff.double_decay();
+                    dequeue_backoff.reset();
 
                     parse(reader_parser_content.data, reader_parser_content.length);
 
@@ -729,7 +729,7 @@ private:
 
         if (parser_classifier_ring_pool->producer_try_dequeue(data))
         {
-            dequeue_from_classifier_backoff.double_decay();
+            dequeue_from_classifier_backoff.reset();
             return;
         }
 

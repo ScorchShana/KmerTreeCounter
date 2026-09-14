@@ -307,7 +307,7 @@ int process_main()
     for (const auto& f : filenames) {
         if (f.size() >= 3 && f.compare(f.size() - 3, 3, ".gz") == 0) gz_count++;
     }
-    const uint32_t reader_num = (gz_count >= 2) ? 2 : 1;
+    const uint32_t reader_num = (gz_count >= 2) ? std::max(std::min(gz_count, n_thread / 20), 2U) : 1;
 
     const uint32_t preReadThreadsNum = std::max(1U, n_thread / 8);
     const uint32_t pre_reader_num = std::min<uint32_t>(filenames.size(), preReadThreadsNum);
@@ -475,6 +475,7 @@ int process_main()
     const uint32_t extra_drain_thread_count = n_thread - (tasker_num - 1);
 
     std::cout << "Thread split:" << std::endl;
+    std::cout << "  reader threads: " << reader_num << std::endl;
     std::cout << "  parser threads: " << parser_num << std::endl;
     std::cout << "  classifier threads: " << classifier_num << std::endl;
     std::cout << "  task threads: " << tasker_num << std::endl;
@@ -514,7 +515,7 @@ int process_main()
     layer_queues->initialize_final_drain_queue(prefix_counts, tree->root_nodes);
 
     // 初始化 FASTQ 读取器，将大文件分块读取并送入 ring_pool 用作流水线起点
-    ReaderThreadPool<N> reader_pool(filenames, k_len, FASTQ_FILE_CHUNK_SIZE, reader_parser_ring_pool.get());
+    ReaderThreadPool<N> reader_pool(filenames, k_len, FASTQ_FILE_CHUNK_SIZE, reader_num, reader_parser_ring_pool.get());
     // FastqClassifier<N> classifier(k_len, parser_classifier_ring_pool.get(), tree.get());
 
     const auto init_end = std::chrono::steady_clock::now();

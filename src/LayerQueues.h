@@ -13,14 +13,19 @@
 template <uint32_t N>
 class LayerQueues
 {
-    std::atomic<long long> size_{ 0 };
+    struct alignas(CACHE_LINE_SIZE) PaddedAtomicSize
+    {
+        std::atomic<long long> size{ 0 };
+    };
+    PaddedAtomicSize size_{ 0 };
+    char padding_[64 - sizeof(std::atomic<long long>)];
     std::array<std::shared_ptr<MPMCRingQueue<Task<N>, TASK_QUEUE_CAPACITY>>, MAX_DEPTH> queues_;
     std::shared_ptr<MPMCRingQueue<Task<N>, 1ULL << (2 * ROOT_BASES)>> final_drain_queue_;
 
 public:
     explicit LayerQueues()
     {
-        size_.store(0, std::memory_order_relaxed);
+        size_.size.store(0, std::memory_order_relaxed);
         for (uint32_t i = 0; i < MAX_DEPTH; ++i)
         {
             queues_[i] = std::make_shared<MPMCRingQueue<Task<N>, TASK_QUEUE_CAPACITY>>();
@@ -65,17 +70,17 @@ public:
 
     void increase_size()
     {
-        size_.fetch_add(1, std::memory_order_release);
+        size_.size.fetch_add(1, std::memory_order_release);
     }
 
     void decrease_size()
     {
-        size_.fetch_sub(1, std::memory_order_release);
+        size_.size.fetch_sub(1, std::memory_order_release);
     }
 
     long long size() const
     {
-        return size_.load(std::memory_order_acquire);
+        return size_.size.load(std::memory_order_acquire);
     }
 };
 

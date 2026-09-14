@@ -64,7 +64,7 @@ class KmerTree
     static constexpr int WRITER_WAITING_MAX_BACKOFF = 64;
     static constexpr int WRITER_WAITING_SPIN_TIME = 256;
 
-    static constexpr uint32_t TASK_ENQUEUE_RETRY_LIMIT = 32;
+    static constexpr uint32_t TASK_ENQUEUE_RETRY_LIMIT = 2;
     static constexpr uint64_t SCATTER_BLOCK_BATCH_SIZE = 4;
 
     struct DrainFrame
@@ -106,6 +106,8 @@ class KmerTree
     static inline thread_local SplitMix64 rng;
 
     static inline thread_local uint64_t thread_local_kmers_in_map = 0;
+
+    static inline thread_local SpinBackoff<32, 64, 64 + 8> classifier_enqueue_spin_backoff;
 
 public:
     // 根节点数组，2^(2 * ROOT_BASES) 个，每个对应一种短前缀
@@ -326,7 +328,12 @@ public:
         release_spare_block();
     }
 
-    void main_add_kmer_block_with_local_root_nodes(std::array<kmer<N>, PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)>& kmer_block_for_copy, std::array<uint32_t, 1ULL << (2 * ROOT_BASES)>& kmer_prefix_counts, node<N>* local_root_nodes)
+    void main_add_kmer_block_with_local_root_nodes(std::array<kmer<N>,
+        PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)>& kmer_block_for_copy,
+        std::array<uint32_t, 1ULL << (2 * ROOT_BASES)>& kmer_prefix_counts,
+        const std::array<uint32_t, 1ULL << (2 * ROOT_BASES)>& prefix_ordered_by_owner,
+        const uint32_t cnt,
+        node<N>* local_root_nodes)
     {
         Task<N> task{};
 
@@ -334,10 +341,9 @@ public:
         uint64_t read_offset = 0;
         auto queue_ptr = layer_queue_->get_queue(0);
 
-        for (uint64_t i = 0; i < (1ULL << (2 * ROOT_BASES)); i++)
+        for (uint64_t index = 0; index < cnt; index++)
         {
-            if (kmer_prefix_counts[i] == 0)
-                continue;
+            uint64_t i = prefix_ordered_by_owner[index];
 
             node<N>* target_root = &local_root_nodes[i];
 
@@ -384,7 +390,19 @@ public:
                     uint64_t start_cycles = __rdtsc();
 #endif
 
-                    queue_ptr->enqueue(task);
+                    if (queue_ptr->try_enqueue(task))
+                    {
+                        classifier_enqueue_spin_backoff.reset();
+                    }
+                    else
+                    {
+                        classifier_enqueue_spin_backoff.backoff();
+                        while (!queue_ptr->try_enqueue(task))
+                        {
+                            classifier_enqueue_spin_backoff.backoff();
+                        }
+                        classifier_enqueue_spin_backoff.decay();
+                    }
                     layer_queue_->increase_size();
 
 #ifdef TEST_MODE
@@ -615,8 +633,6 @@ private:
         uint64_t remaining = thread_local_block_prefix_counts[prefix];
         uint64_t block_for_copy_offset = in_block_for_copy_offset;
         constexpr uint32_t capacity = get_block_capacity();
-
-        __builtin_prefetch(thread_local_block_for_copy.data() + block_for_copy_offset, 0, 0);
 
         while (remaining > 0)
         {
@@ -1018,8 +1034,6 @@ private:
     void flush_part_of_block_to_child(node<N>* child_node, const uint64_t prefix, const uint64_t in_block_for_copy_offset, const uint32_t current_depth)
     {
         Task<N> task{};
-
-        ///__builtin_prefetch(thread_local_block_for_copy.data() + in_block_for_copy_offset, 0, 0);
 
         uint64_t block_for_copy_offset = in_block_for_copy_offset;
         uint64_t remaining = thread_local_block_prefix_counts[prefix];

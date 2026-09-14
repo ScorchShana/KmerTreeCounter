@@ -88,13 +88,14 @@ class SchedulerThreadPool final
     std::barrier<> drain_all_done_barrier;
     FinalDrainWriterThread drain_writer_thread_;
 
-    inline static thread_local SpinBackoff<64, 128, 128 + 16, 16> backoff;
+    inline static thread_local SpinBackoff<16, 128, 128 + 8, 8> backoff;
     inline static thread_local SplitMix64 rng;
 
     inline static thread_local std::array<uint64_t, MAX_DEPTH> local_depth_task_cycles{};
     inline static thread_local std::array<uint64_t, MAX_DEPTH> local_depth_task_count{};
 
 #ifdef TEST_MODE
+    inline static thread_local bool first_flag{ false };
     inline static thread_local uint64_t backoff_time_with_tasks{ 0 };
     inline static thread_local uint64_t steal_tasks{ 0 };
     inline static thread_local uint64_t home_tasks{ 0 };
@@ -111,6 +112,8 @@ class SchedulerThreadPool final
     std::vector<std::size_t> max_local_stack_size;
     std::mutex segment_histogram_lock;
     std::map<uint32_t, uint32_t> segment_histogram;
+    std::atomic<uint64_t> total_segment_probe{ 0 };
+    std::atomic<uint64_t> total_segment_probe_time{ 0 };
 #endif
 
 public:
@@ -155,6 +158,19 @@ public:
             std::cout << "SchedulerThreadPool Depth " << d << " Steal Tasks : " << total_depth_steal_tasks[d].load() << std::endl;
         }
 
+        for (uint32_t d = 0; d < MAX_DEPTH; ++d)
+        {
+            uint64_t total_cycles = 0;
+            uint64_t total_tasks = 0;
+            for (uint32_t w = 0;w < thread_count_ - 1; ++w)
+            {
+                total_cycles = worker_infos[w].depth_task_cycles[d].load();
+                total_tasks = worker_infos[w].depth_task_count[d].load();
+            }
+            const uint64_t avg_cycles_per_task = (total_tasks > 0) ? total_cycles / total_tasks : 0;
+            std::cout << "SchedulerThreadPool Depth " << d << " Task cycles : " << avg_cycles_per_task << std::endl;
+        }
+
         std::size_t max_local_stack_size_total = 0;
         for (uint32_t w = 0; w < thread_count_ - 1; ++w)
         {
@@ -162,10 +178,14 @@ public:
         }
         std::cout << "SchedulerThreadPool Max Local Stack Size : " << max_local_stack_size_total << std::endl;
 
-        for(const auto& p : segment_histogram)
+        for (const auto& p : segment_histogram)
         {
             std::cout << "Segment " << p.first << " : " << p.second << std::endl;
         }
+
+        std::cout << "Total Segment Probe : " << total_segment_probe.load() << std::endl;
+        std::cout << "Total Segment Probe Time : " << total_segment_probe_time.load() << std::endl;
+        std::cout << "Average Segment Probe Time : " << (total_segment_probe_time.load() > 0 ? static_cast<double>(total_segment_probe.load()) / total_segment_probe_time.load() : 0.0) << std::endl;
 #endif
     }
 
@@ -379,21 +399,27 @@ private:
 
         if (processed == max_process_tasks)
         {
-            backoff.double_decay();
-            if (end_cycles > start_cycles)
+            backoff.reset();
+            if (end_cycles > start_cycles) [[likely]]
             {
                 local_depth_task_cycles[depth] += end_cycles - start_cycles;
                 local_depth_task_count[depth] += processed;
             }
+#ifdef TEST_MODE
+            first_flag = true;
+#endif
         }
         else if (processed)
         {
             backoff.decay();
-            if (end_cycles > start_cycles)
+            if (end_cycles > start_cycles) [[likely]]
             {
                 local_depth_task_cycles[depth] += end_cycles - start_cycles;
                 local_depth_task_count[depth] += processed;
             }
+#ifdef TEST_MODE
+            first_flag = true;
+#endif
         }
         else if (tree_ptr_->get_local_stack_size() > 0)
         {
@@ -409,7 +435,7 @@ private:
         {
 
 #ifdef TEST_MODE
-            if (layer_queues_ptr_->size() > 0) {
+            if (first_flag && layer_queues_ptr_->size() > 0) {
                 ++backoff_time_with_tasks;
             }
 #endif
@@ -463,6 +489,8 @@ private:
             total_depth_steal_tasks[d].fetch_add(depth_steal_tasks[d], std::memory_order_relaxed);
             total_depth_home_tasks[d].fetch_add(depth_home_tasks[d], std::memory_order_relaxed);
         }
+        total_segment_probe.fetch_add(ConcurrentOpenAddressHashMap<N>::segment_probe, std::memory_order_relaxed);
+        total_segment_probe_time.fetch_add(ConcurrentOpenAddressHashMap<N>::segment_probe_time, std::memory_order_relaxed);
 #endif
 
         const uint32_t total_workers = thread_count_ - 1;
