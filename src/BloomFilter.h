@@ -208,9 +208,9 @@ public:
     {
         const auto hash_res = XXH3_128bits(&k_mer, sizeof(k_mer));
         const uint64_t h1 = hash_res.low64;
-        const uint64_t h2 = (hash_res.high64 | 1ULL);
+        const uint64_t h2 = hash_res.high64;
 
-        return { h1 & mod, calculate_insert_num(h1, h2) };
+        return { h1 & mod, calculate_insert_num(h2) };
     }
 
     void prefetch_insert(const InsertProbe& probe) const noexcept
@@ -236,7 +236,7 @@ public:
     bool insert(const kmer<N>& k_mer) noexcept
     {
         const InsertProbe probe = prepare_insert(k_mer);
-        return insert_prepared(probe); 
+        return insert_prepared(probe);
     }
 
     std::atomic<uint64_t>* get_filter_bins()
@@ -245,15 +245,16 @@ public:
     }
 
 private:
-    uint64_t calculate_insert_num(const uint64_t h1, const uint64_t h2)const noexcept
+    uint64_t calculate_insert_num(const uint64_t h)const noexcept
     {
         uint64_t insert_num = 0;
+        const uint64_t p0 = h & BITS_MOD;
+        insert_num|= (1ULL << p0);
+        const uint64_t p1 = (h >> 21) & BITS_MOD;
+        insert_num|= (1ULL << p1);
+        const uint64_t p2 = (h >> 42) & BITS_MOD;
+        insert_num|= (1ULL << p2);
 
-#pragma unroll
-        for (uint64_t i = 0; i < NUM_HASHES; i++)
-        {
-            insert_num |= (1ULL << ((h1 + i * h2) & BITS_MOD));
-        }
         return insert_num;
     }
 };

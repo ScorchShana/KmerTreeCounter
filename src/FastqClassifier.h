@@ -23,9 +23,9 @@ class FastqClassifier
 {
 
     // 自旋参数
-    static constexpr int SLEEP_THRESHOLD = 128;
-    static constexpr int YIELD_THRESHOLD = 64;
-    static constexpr int MAX_BACKOFF = 64;
+    static constexpr int SLEEP_THRESHOLD = 128 + 16;
+    static constexpr int YIELD_THRESHOLD = 128;
+    static constexpr int MAX_BACKOFF = 32;
 
     static constexpr uint64_t EXPORT_KMER_BLOCK_CAPACITY = EXPORT_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>);
     static constexpr uint32_t BLOOM_PREFETCH_DISTANCE = 16; // 预取 Bloom Filter 的距离（单位：k-mer数量）
@@ -48,6 +48,8 @@ class FastqClassifier
     std::array<uint32_t, 1ULL << (2 * ROOT_BASES)> local_block_prefix_sums{};
     std::array<ConcurrentBloomFilter<N>*, 1ULL << (2 * ROOT_BASES)> local_global_bloom_filter{};
 
+    std::array<uint32_t, 1ULL << (2 * ROOT_BASES)> prefix_ordered_by_owner{};
+
     std::array<kmer<N>, PARSER_CLASSIFIER_RING_MEMORY_POOL_BLOCK_SIZE / sizeof(kmer<N>)> local_block_for_copy{};
 
     ExportBlock<N>* export_block_ptr = nullptr;
@@ -57,6 +59,7 @@ class FastqClassifier
     SpinBackoff<MAX_BACKOFF, YIELD_THRESHOLD, SLEEP_THRESHOLD> dequeue_from_export_writer_backoff;
 
     std::vector<ConcurrentBloomFilter<N>> local_bloom_filters;
+    std::vector<uint32_t> local_owned_preifx{};
 
     uint32_t check_local_first_round = 16;
     uint32_t local_first_round = 0;
@@ -111,6 +114,7 @@ public:
         {
             if (local_prefix_owners[i] == classifier_index) {
                 global_bloom_filter[i] = &local_bloom_filters[local_bloom_filters_index++];
+                local_owned_preifx.push_back(i);
             }
 
         }
@@ -195,7 +199,7 @@ public:
                     not_first_flag = true;
 #endif
 
-                    dequeue_backoff.double_decay();
+                    dequeue_backoff.reset();
 
 
                     kmer<N>* kmer_data = reinterpret_cast<kmer<N> *>(content.data);
@@ -330,8 +334,9 @@ private:
         uint64_t local_block_count = 0;
 
         uint64_t read_offset = 0;
-        for (uint64_t prefix = 0; prefix < local_block_prefix_counts.size(); prefix++)
+        for (uint64_t index = 0; index < local_owned_preifx.size(); index++)
         {
+            const uint64_t prefix = local_owned_preifx[index];
             const uint32_t prefix_count = local_block_prefix_counts[prefix];
             if (prefix_count == 0)
             {
@@ -438,7 +443,13 @@ private:
 
         if (local_block_count > 0) [[likely]]
         {
-            tree->main_add_kmer_block_with_local_root_nodes(local_block_for_copy, local_block_prefix_counts, local_root_nodes.data());
+            uint32_t cnt = 0;
+            for (uint64_t i = 0; i < local_owned_preifx.size(); i++)
+            {
+                prefix_ordered_by_owner[cnt] = local_owned_preifx[i];
+                cnt = (local_block_prefix_counts[local_owned_preifx[i]] > 0) ? cnt + 1 : cnt;
+            }
+            tree->main_add_kmer_block_with_local_root_nodes(local_block_for_copy, local_block_prefix_counts, prefix_ordered_by_owner, cnt, local_root_nodes.data());
         }
     }
 
@@ -574,8 +585,13 @@ private:
 
         if (local_block_count > 0) [[likely]]
         {
-
-            tree->main_add_kmer_block_with_local_root_nodes(local_block_for_copy, local_block_prefix_counts, local_root_nodes.data());
+            uint32_t cnt = 0;
+            for (uint64_t i = 0; i < (1ULL << (2 * ROOT_BASES)); i++)
+            {
+                prefix_ordered_by_owner[cnt] = i;
+                cnt = (local_block_prefix_counts[i] > 0) ? cnt + 1 : cnt;
+            }
+            tree->main_add_kmer_block_with_local_root_nodes(local_block_for_copy, local_block_prefix_counts, prefix_ordered_by_owner, cnt, local_root_nodes.data());
         }
     }
 

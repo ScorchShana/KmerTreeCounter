@@ -12,9 +12,19 @@
 #include <cstring>
 #include <map>
 
+#ifdef TEST_MODE
+#include <utility>
+#endif
+
 template <uint32_t N>
 class ConcurrentOpenAddressHashMap
 {
+
+
+    struct alignas(CACHE_LINE_SIZE) SizeCounter
+    {
+        std::atomic<int64_t> value{ 0 };
+    };
 
     static constexpr size_t align_up(const size_t value, const size_t alignment)
     {
@@ -28,7 +38,8 @@ class ConcurrentOpenAddressHashMap
     static constexpr std::size_t MAP_SIZE = align_up(sizeof(ConcurrentOpenAddressHashMap<N>), CACHE_LINE_SIZE);
     static constexpr std::size_t MAP_NUM_PER_BLOCK = KMER_BLOCK_SIZE / MAP_SIZE;
 
-    std::atomic<int64_t> size;
+    SizeCounter size;
+    uint64_t segment_id;
     uint64_t capacity;
     std::atomic<uint8_t>* ctrls;
     kmer<N>* keys;
@@ -45,6 +56,8 @@ public:
 
 #ifdef TEST_MODE
     inline static thread_local std::map<uint32_t, uint32_t> segment_histogram;
+    inline static thread_local uint64_t segment_probe = 0;
+    inline static thread_local uint64_t segment_probe_time = 0;
 #endif 
 
     enum class InsertResult
@@ -87,8 +100,9 @@ public:
 #endif
 
     ConcurrentOpenAddressHashMap(uint64_t capacity)
-        : size(0), capacity(capacity), sealed(false), building_next(false), next_map(nullptr)
+        : segment_id(0), capacity(capacity), sealed(false), building_next(false), next_map(nullptr)
     {
+        size.value.store(0, std::memory_order_relaxed);
         char* mem_area = reinterpret_cast<char*>(pool->allocate_large(get_mem_size(capacity)));
         ctrls = reinterpret_cast<std::atomic<uint8_t>*>(mem_area);
         keys = reinterpret_cast<kmer<N>*>(ctrls + capacity);
@@ -153,7 +167,20 @@ public:
     }
 
 #ifdef TEST_MODE
-    void count_to_histogram() {
+    uint32_t get_segment_count()
+    {
+        const ConcurrentOpenAddressHashMap<N>* map = this;
+        uint32_t cnt = 0;
+        while (map != nullptr)
+        {
+            cnt++;
+            map = map->next_map.load(std::memory_order_acquire);
+        }
+        return cnt;
+    }
+
+    void count_to_histogram()
+    {
         const ConcurrentOpenAddressHashMap<N>* map = this;
         uint32_t cnt = 0;
         while (map != nullptr)
@@ -164,7 +191,30 @@ public:
         segment_histogram[cnt]++;
     }
 
-    static std::map<uint32_t, uint32_t> get_segment_histogram() {
+    std::pair<uint64_t, uint64_t> get_kmer_infos()
+    {
+        uint64_t singleton_kmers = 0;
+        uint64_t unique_kmers = 0;
+
+        const ConcurrentOpenAddressHashMap<N>* map = this;
+        while (map != nullptr)
+        {
+            for (uint64_t i = 0; i < map->capacity; ++i)
+            {
+                const uint8_t ctrl = map->ctrls[i].load(std::memory_order_acquire);
+                if ((ctrl & 0x80U) != 0) [[likely]]
+                {
+                    ++unique_kmers;
+                    singleton_kmers += (map->counts[i].load(std::memory_order_relaxed) > 1) ? 0 : 1;
+                }
+            }
+            map = map->next_map.load(std::memory_order_acquire);
+        }
+        return std::make_pair(singleton_kmers, unique_kmers);
+    }
+
+    static std::map<uint32_t, uint32_t> get_segment_histogram()
+    {
         return segment_histogram;
     }
 #endif
@@ -241,11 +291,11 @@ public:
                         return InsertResult::FULL; // Indicate that the map is full
                     }
                     // Successfully marked as inserting
-                    const uint64_t old_size = size.fetch_add(1, std::memory_order_acq_rel);
+                    const uint64_t old_size = size.value.fetch_add(1, std::memory_order_acq_rel);
 
                     if (old_size >= static_cast<uint64_t>(cur_max_size)) [[unlikely]]
                     {
-                        size.fetch_sub(1, std::memory_order_acq_rel); // Revert size increment
+                        size.value.fetch_sub(1, std::memory_order_acq_rel); // Revert size increment
                         ctrls[index].store(EMPTY, std::memory_order_release); // Revert control to EMPTY
                         sealed.store(true, std::memory_order_release);
                         return InsertResult::FULL; // Indicate that the map is full
@@ -306,8 +356,15 @@ public:
 
         ConcurrentOpenAddressHashMap<N>* map_ptr = this;
 
+#ifdef TEST_MODE
+        ++segment_probe_time;
+#endif
+
         for (;;)
         {
+#ifdef TEST_MODE
+            ++segment_probe;
+#endif
             InsertResult res = map_ptr->try_increment(h, key, fp, value, local_count);
             if (res == InsertResult::FULL)
             {
@@ -351,7 +408,7 @@ public:
         while (map != nullptr)
         {
             visitor(segment_index,
-                map->size.load(std::memory_order_acquire),
+                map->size.value.load(std::memory_order_acquire),
                 map->sealed.load(std::memory_order_acquire),
                 map->capacity);
             map = map->next_map.load(std::memory_order_acquire);
@@ -411,9 +468,12 @@ public:
                     else
                     {
                         // Build the next map
+                        uint32_t cur_segment_id = this->segment_id + 1;
                         ConcurrentOpenAddressHashMap<N>* new_map = reinterpret_cast<ConcurrentOpenAddressHashMap<N>*>(get_map_metadata_mem());
-                        uint64_t new_capacity = std::min<uint64_t>(capacity * 2, concurrent_hash_map_max_capacity); // Double the capacity for the next map
+                        uint64_t new_capacity = cur_segment_id > SEGMENT_WATERMARK ? capacity * 4 : capacity * 2;
+                        new_capacity = std::min<uint64_t>(new_capacity, concurrent_hash_map_max_capacity); // Double the capacity for the next map
                         new(new_map) ConcurrentOpenAddressHashMap<N>(new_capacity);
+                        new_map->segment_id = cur_segment_id;
                         next_map.store(new_map, std::memory_order_release);
                         building_next.store(false, std::memory_order_release);
                         return new_map;

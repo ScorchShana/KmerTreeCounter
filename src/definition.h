@@ -1,7 +1,7 @@
 #ifndef TREE_DEFINITION_HEADER
 #define TREE_DEFINITION_HEADER
 
-#define TEST_MODE
+// #define TEST_MODE
 
 // #include "SpinLock.h"
 
@@ -238,6 +238,9 @@ inline std::array<void*, 1U << (2 * ROOT_BASES)> global_bloom_filter{};
 
 // prefix 对应的哈希表容量
 // inline std::array<uint64_t, 1U << (2 * ROOT_BASES)> concurrent_map_capacity;
+
+// 哈希表 segment 加速递增的水位
+constexpr uint32_t SEGMENT_WATERMARK = 3;
 
 inline uint8_t avgQuality = 0;
 

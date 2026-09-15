@@ -122,7 +122,7 @@ public:
                     not_first_flag = true;
 #endif
 
-                    dequeue_backoff.double_decay();
+                    dequeue_backoff.reset();
 
                     parse(reader_parser_content.data, reader_parser_content.length);
 
@@ -640,10 +640,10 @@ private:
 
     void flush_kmer_buffer()
     {
+        // divide_kmer_buffer_into_owner_contents(kmer_buffer.data(), kmer_buffer_count);
         calculate_block_owner_counts(kmer_buffer.data(), kmer_buffer_count);
-        divide_kmer_buffer_into_owner_contents(kmer_buffer.data(), kmer_buffer_count);
-        // push_kmers_into_local_block_for_copy(kmer_buffer.data(), kmer_buffer_count);
-        // divide_kmers_into_owner_contents();
+        push_kmers_into_local_block_for_copy(kmer_buffer.data(), kmer_buffer_count);
+        divide_kmers_into_owner_contents();
         total_read_kmer += kmer_buffer_count;
         kmer_buffer_count = 0;
     }
@@ -729,7 +729,7 @@ private:
 
         if (parser_classifier_ring_pool->producer_try_dequeue(data))
         {
-            dequeue_from_classifier_backoff.double_decay();
+            dequeue_from_classifier_backoff.reset();
             return;
         }
 

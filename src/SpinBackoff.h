@@ -34,21 +34,21 @@ public:
             request_sleep_time++;
 #endif
         }
-        ++count_;
+        count_ = std::min(count_ + 1, SLEEP_THRESHOLD);
     }
 
     void decay()
     {
         count_ >>= 1;          // 阶段计数器指数衰减
         backoff_ = (backoff_ > 1) ? backoff_ / 2 : 1; // backoff 也指数衰减
-        sleep_time_us_ = (sleep_time_us_ > 1) ? sleep_time_us_ / 2 : 1; // sleep_time 也指数衰减
+        sleep_time_us_ = 1; // sleep_time 也指数衰减
     }
 
     void double_decay()
     {
         count_ >>= 2;          // 阶段计数器双倍指数衰减
         backoff_ = (backoff_ > 3) ? backoff_ / 4 : 1; // backoff 也双倍指数衰减
-        sleep_time_us_ = (sleep_time_us_ > 3) ? sleep_time_us_ / 4 : 1; // sleep_time 也双倍指数衰减
+        sleep_time_us_ = 1; // sleep_time 也双倍指数衰减
     }
 
     void reset()
