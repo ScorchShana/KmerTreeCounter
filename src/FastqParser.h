@@ -310,23 +310,20 @@ private:
             uint32_t bits = all_valid_bits | invalid_bits;
             while (bits)
             {
-                int idx = __builtin_ctz(bits);
-                uint32_t bit = 1u << idx;
+                const uint32_t idx = static_cast<uint32_t>(__builtin_ctz(bits));
+                const uint32_t bit = 1u << idx;
 
                 if (base_bits & bit)
                 {
-                    // 找到一段连续碱基运行；计算其长度
-                    uint32_t run_bits = base_bits >> idx;
-                    int run_len = 1;
-                    // 限定最长 32 个碱基
-                    while ((idx + run_len < 32) && (run_len < 32) && (run_bits & (1u << run_len)))
-                    {
-                        ++run_len;
-                    }
+                    const uint32_t run_bits = base_bits >> idx;
+                    const uint32_t inverted_run_bits = ~run_bits;
+                    const uint32_t run_len = inverted_run_bits != 0
+                        ? static_cast<uint32_t>(__builtin_ctz(inverted_run_bits))
+                        : 32u;
 
                     // 将此运行中的所有碱基编码打包为一个 uint64_t
                     uint64_t packed = 0;
-                    for (int i = 0; i < run_len; ++i)
+                    for (uint32_t i = 0; i < run_len; ++i)
                     {
                         packed = (packed << 2) | codes[idx + i];
                     }
@@ -350,8 +347,8 @@ private:
                         &kmer_buffer[kmer_buffer_count]);
                     kmer_buffer_count += new_kmers;
 
-                    // 清除已处理的位
-                    uint32_t clear_mask = static_cast<uint32_t>(((1ULL << run_len) - 1ULL) << idx);
+                    const uint32_t clear_mask = static_cast<uint32_t>(
+                        ((1ULL << run_len) - 1ULL) << idx);
                     bits &= ~clear_mask;
                 }
                 else
@@ -420,20 +417,19 @@ private:
             uint16_t bits = all_valid | invalid;
             while (bits)
             {
-                int idx = __builtin_ctz(bits);
-                uint16_t bit = 1u << idx;
+                const uint32_t idx = static_cast<uint32_t>(__builtin_ctz(bits));
+                const uint16_t bit = static_cast<uint16_t>(1u << idx);
 
                 if (base_bits & bit)
                 {
-                    uint16_t run_bits = base_bits >> idx;
-                    int run_len = 1;
-                    while ((idx + run_len < 16) && (run_len < 16) && (run_bits & (1u << run_len)))
-                    {
-                        ++run_len;
-                    }
+                    const uint16_t run_bits = static_cast<uint16_t>(base_bits >> idx);
+                    const uint16_t inverted_run_bits = static_cast<uint16_t>(~run_bits);
+                    const uint32_t run_len = inverted_run_bits != 0
+                        ? static_cast<uint32_t>(__builtin_ctz(inverted_run_bits))
+                        : 16u;
 
                     uint32_t packed = 0;
-                    for (int i = 0; i < run_len; ++i)
+                    for (uint32_t i = 0; i < run_len; ++i)
                     {
                         packed = (packed << 2) | codes[idx + i];
                     }
@@ -455,8 +451,9 @@ private:
                         &kmer_buffer[kmer_buffer_count]);
                     kmer_buffer_count += new_kmers;
 
-                    uint16_t clear_mask = static_cast<uint16_t>(((1U << run_len) - 1U) << idx);
-                    bits &= ~clear_mask;
+                    const uint16_t clear_mask = static_cast<uint16_t>(
+                        ((1U << run_len) - 1U) << idx);
+                    bits &= static_cast<uint16_t>(~clear_mask);
                 }
                 else
                 {
