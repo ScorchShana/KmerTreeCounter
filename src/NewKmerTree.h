@@ -336,6 +336,7 @@ public:
         node<N>* local_root_nodes)
     {
         Task<N> task{};
+        uint32_t local_increase_count = 0;
 
         constexpr uint32_t capacity = get_block_capacity();
         uint64_t read_offset = 0;
@@ -390,7 +391,7 @@ public:
                     uint64_t start_cycles = __rdtsc();
 #endif
 
-                    layer_queue_->increase_size(0);
+                    ++local_increase_count;
                     if (queue_ptr->try_enqueue(task))
                     {
                         classifier_enqueue_spin_backoff.reset();
@@ -430,6 +431,10 @@ public:
                 total_kmers_added.fetch_add(copy_this_time, std::memory_order_relaxed);
 #endif
             }
+        }
+        if (local_increase_count > 0)
+        {
+            layer_queue_->increase_size(0, local_increase_count);
         }
     }
 
