@@ -223,6 +223,11 @@ private:
     // 获取当前线程应该使用的 Arena 索引
     int get_thread_arena_index() const;
 
+    // 检测当前线程是否仍位于本地 Arena 对应的 NUMA 节点上。
+    // 若线程已迁移或 TLS 尚未初始化，会刷新/初始化本地缓存并切换 Arena。
+    // 返回值：true 表示本地空闲栈已被清空/刚初始化，调用方可以考虑一次性补充较多块。
+    bool ensure_thread_arena_affinity();
+
     // 构建按 NUMA 距离排序的候选 Arena 索引列表（用于本地 Arena 耗尽时窃取）
     inline void build_numa_distance_order();
 
@@ -977,6 +982,54 @@ inline int ConcurrentMemoryPool::get_thread_arena_index() const
     return 0;
 }
 
+inline bool ConcurrentMemoryPool::ensure_thread_arena_affinity()
+{
+    ThreadLocalCache& tls = tls_cache_;
+    const int current_arena = get_thread_arena_index();
+
+    // 首次访问：初始化 TLS 并绑定到当前 NUMA 节点
+    if (!tls.pool) [[unlikely]]
+    {
+        tls.pool = this;
+        tls.local_arena_index = current_arena;
+        tls.local_arena = &arenas_[current_arena];
+        tls.local_free_stack = nullptr;
+        tls.local_free_count = 0;
+        return true;
+    }
+
+    // 未发生迁移，保持现状
+    if (current_arena == tls.local_arena_index) [[likely]]
+    {
+        return false;
+    }
+
+    // 线程已迁移到其它 NUMA 节点：把本地缓存中属于旧 Arena 的块批量归还
+    if (tls.local_free_stack)
+    {
+        FreeBlock* head = tls.local_free_stack;
+        FreeBlock* tail = head;
+        size_t count = 1;
+        while (tail->next)
+        {
+            tail = tail->next;
+            ++count;
+        }
+
+        batch_deallocate_to_arena(*tls.local_arena, head, tail, count);
+
+        tls.local_free_stack = nullptr;
+        tls.local_free_count = 0;
+    }
+
+    // 切换到新的本地 Arena
+    tls.local_arena_index = current_arena;
+    tls.local_arena = &arenas_[current_arena];
+    tls.pool = this;
+
+    return true;
+}
+
 inline ThreadLocalCache& ConcurrentMemoryPool::get_thread_local_cache()
 {
     return tls_cache_;
@@ -993,13 +1046,8 @@ inline void* ConcurrentMemoryPool::allocate_large(size_t bytes)
 
     ThreadLocalCache& tls = tls_cache_;
 
-    // 初始化 TLS（首次访问）
-    if (!tls.pool) [[unlikely]]
-    {
-        tls.pool = this;
-        tls.local_arena_index = get_thread_arena_index();
-        tls.local_arena = &arenas_[tls.local_arena_index];
-    }
+    // 确保线程仍位于本地 Arena 对应的 NUMA 节点上，必要时切换 Arena
+    ensure_thread_arena_affinity();
 
     char* ptr = bump_allocate_from_arena(*tls.local_arena, bytes);
     if (ptr) [[likely]]
@@ -1038,27 +1086,22 @@ inline void* ConcurrentMemoryPool::allocate()
     FreeBlock* head, * tail;
     size_t fetched = 0;
 
-    // 初始化 TLS（首次访问）
-    if (!tls.pool) [[unlikely]]
-    {
-        tls.pool = this;
-        tls.local_arena_index = get_thread_arena_index();
-        tls.local_arena = &arenas_[tls.local_arena_index];
-        fetched = batch_allocate_from_arena(*tls.local_arena, &head, &tail, TLS_CAPACITY);
-    }
-    else
-    {
-        // 1. 尝试从本地空闲栈分配
-        if (tls.local_free_stack) [[likely]]
-        {
-            FreeBlock* block = tls.local_free_stack;
-            tls.local_free_stack = block->next;
-            tls.local_free_count--;
+    // 确保线程仍位于本地 Arena 对应的 NUMA 节点上，必要时切换 Arena。
+    // 首次访问或发生迁移时，会返回 true，此时可一次性补充较多块到本地缓存。
+    const bool needs_full_refill = ensure_thread_arena_affinity();
 
-            return block;
-        }
-        fetched = batch_allocate_from_arena(*tls.local_arena, &head, &tail, BATCH_SIZE);
+    // 1. 尝试从本地空闲栈分配
+    if (tls.local_free_stack) [[likely]]
+    {
+        FreeBlock* block = tls.local_free_stack;
+        tls.local_free_stack = block->next;
+        tls.local_free_count--;
+
+        return block;
     }
+
+    fetched = batch_allocate_from_arena(*tls.local_arena, &head, &tail,
+                                        needs_full_refill ? TLS_CAPACITY : BATCH_SIZE);
 
     // 2. 本地栈为空，从本地 Arena 批量获取
     if (fetched > 0)
@@ -1113,13 +1156,8 @@ inline void ConcurrentMemoryPool::deallocate(void* ptr)
 
     ThreadLocalCache& tls = tls_cache_;
 
-    // 初始化 TLS（首次访问）
-    if (!tls.pool)
-    {
-        tls.pool = this;
-        tls.local_arena_index = get_thread_arena_index();
-        tls.local_arena = &arenas_[tls.local_arena_index];
-    }
+    // 确保线程仍位于本地 Arena 对应的 NUMA 节点上，必要时切换 Arena
+    ensure_thread_arena_affinity();
 
     FreeBlock* block = reinterpret_cast<FreeBlock*>(ptr);
 
