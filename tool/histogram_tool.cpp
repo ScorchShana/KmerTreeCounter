@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
@@ -9,21 +10,21 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include <aio.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "ExportReader.h"
-#include "FinalDrainReader.h"
 #include "FlatConcurrentHashMap.h"
-#include "HighFrequencyInsertThreadPool.h"
 #include "LowFrequencyQueryThreadPool.h"
-#include "ApproximateHighFrequency.h"
 
 #include "../src/RingMemoryPool.h"
+#include "../src/SpinBackoff.h"
 
 namespace
 {
@@ -385,6 +386,582 @@ namespace
         return total;
     }
 
+    // Main-thread AIO double-buffered reader. It only copies compact records out
+    // of the file, byte for byte, into a ring-pool block; unpacking happens in
+    // the workers, so no whole block is ever expanded into ExportRecord<N>.
+    class CompactRecordReader
+    {
+        static constexpr uint64_t RAW_BUFFER_SIZE = 512 * 1024;
+
+    public:
+        explicit CompactRecordReader(const uint32_t k_len, const uint32_t count_bytes)
+        {
+            const uint64_t full_words = k_len / BASES_PER_U64T;
+            const uint64_t tail_bits = 2 * (k_len % BASES_PER_U64T);
+            const uint64_t tail_bytes = (tail_bits + 7) / 8;
+            compact_record_size_ = full_words * sizeof(uint64_t) + tail_bytes + count_bytes;
+
+            for (struct aiocb& cb : cbs_)
+            {
+                std::memset(&cb, 0, sizeof(struct aiocb));
+            }
+        }
+
+        CompactRecordReader(const CompactRecordReader&) = delete;
+        CompactRecordReader& operator=(const CompactRecordReader&) = delete;
+        CompactRecordReader(CompactRecordReader&&) = delete;
+        CompactRecordReader& operator=(CompactRecordReader&&) = delete;
+
+        ~CompactRecordReader()
+        {
+            close();
+        }
+
+        void open(const std::string& filename)
+        {
+            if (fd_ >= 0)
+            {
+                close();
+            }
+
+            fd_ = ::open(filename.c_str(), O_RDONLY);
+            if (fd_ < 0) [[unlikely]]
+            {
+                std::cerr << "failed to open " << filename << ": " << std::strerror(errno) << std::endl;
+                exit(-1);
+            }
+
+            struct stat st{};
+            if (::fstat(fd_, &st) != 0) [[unlikely]]
+            {
+                std::cerr << "failed to stat " << filename << ": " << std::strerror(errno) << std::endl;
+                exit(-1);
+            }
+
+            const uint64_t file_size = static_cast<uint64_t>(st.st_size);
+            if (file_size % compact_record_size_ != 0) [[unlikely]]
+            {
+                std::cerr << "invalid high.bin size: " << file_size
+                    << " is not divisible by compact record size "
+                    << compact_record_size_ << std::endl;
+                exit(-1);
+            }
+
+            ::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
+
+            record_amount_ = file_size / compact_record_size_;
+            scheduled_record_count_ = 0;
+            delivered_record_count_ = 0;
+            current_buffer_index_ = 0;
+
+            for (uint32_t i = 0; i < 2; ++i)
+            {
+                std::memset(&cbs_[i], 0, sizeof(struct aiocb));
+                if (buffers_[i] == nullptr)
+                {
+                    buffers_[i] = new char[RAW_BUFFER_SIZE];
+                }
+                cbs_active_[i] = false;
+                buffer_record_count_[i] = 0;
+                buffer_cursor_[i] = 0;
+            }
+
+            async_read(0);
+        }
+
+        void close()
+        {
+            for (uint32_t i = 0; i < 2; ++i)
+            {
+                wait_read_finish(i);
+            }
+
+            if (fd_ >= 0)
+            {
+                ::close(fd_);
+                fd_ = -1;
+            }
+
+            for (uint32_t i = 0; i < 2; ++i)
+            {
+                delete[] buffers_[i];
+                buffers_[i] = nullptr;
+                cbs_active_[i] = false;
+                buffer_record_count_[i] = 0;
+                buffer_cursor_[i] = 0;
+                std::memset(&cbs_[i], 0, sizeof(struct aiocb));
+            }
+
+            record_amount_ = 0;
+            scheduled_record_count_ = 0;
+            delivered_record_count_ = 0;
+            current_buffer_index_ = 0;
+        }
+
+        [[nodiscard]] bool finished() const noexcept
+        {
+            return delivered_record_count_ >= record_amount_;
+        }
+
+        // Copies whole records verbatim; the bytes handed to the pool are the
+        // bytes on disk. Small requests, requests that straddle the two buffers
+        // and reads past EOF are all handled here.
+        uint64_t read_compact_records(char* out_buffer, const uint64_t max_records_to_read)
+        {
+            if (finished()) [[unlikely]]
+            {
+                return 0;
+            }
+
+            uint64_t total_read = 0;
+            while (total_read < max_records_to_read && !finished())
+            {
+                const uint32_t idx = current_buffer_index_;
+
+                if (cbs_active_[idx])
+                {
+                    wait_read_finish(idx);
+                    async_read(1 - idx);
+                }
+
+                const uint64_t available = buffer_record_count_[idx] - buffer_cursor_[idx];
+                if (available == 0) [[unlikely]]
+                {
+                    current_buffer_index_ = 1 - idx;
+                    continue;
+                }
+
+                const uint64_t to_copy = std::min(max_records_to_read - total_read, available);
+                std::memcpy(
+                    out_buffer + total_read * compact_record_size_,
+                    buffers_[idx] + buffer_cursor_[idx] * compact_record_size_,
+                    static_cast<size_t>(to_copy * compact_record_size_));
+
+                buffer_cursor_[idx] += to_copy;
+                delivered_record_count_ += to_copy;
+                total_read += to_copy;
+
+                if (buffer_cursor_[idx] >= buffer_record_count_[idx])
+                {
+                    buffer_record_count_[idx] = 0;
+                    buffer_cursor_[idx] = 0;
+                    current_buffer_index_ = 1 - idx;
+                }
+            }
+
+            return total_read;
+        }
+
+    private:
+        void async_read(const uint32_t buffer_index)
+        {
+            if (scheduled_record_count_ >= record_amount_ || cbs_active_[buffer_index]) [[unlikely]]
+            {
+                return;
+            }
+
+            const uint64_t remaining = record_amount_ - scheduled_record_count_;
+            const uint64_t buffer_capacity = RAW_BUFFER_SIZE / compact_record_size_;
+            const uint64_t read_count = std::min(buffer_capacity, remaining);
+            if (read_count == 0)
+            {
+                return;
+            }
+
+            const uint64_t read_bytes = read_count * compact_record_size_;
+            const uint64_t read_offset = scheduled_record_count_ * compact_record_size_;
+
+            buffer_record_count_[buffer_index] = read_count;
+            buffer_cursor_[buffer_index] = 0;
+
+            std::memset(&cbs_[buffer_index], 0, sizeof(struct aiocb));
+            cbs_[buffer_index].aio_fildes = fd_;
+            cbs_[buffer_index].aio_buf = buffers_[buffer_index];
+            cbs_[buffer_index].aio_nbytes = static_cast<size_t>(read_bytes);
+            cbs_[buffer_index].aio_offset = static_cast<off_t>(read_offset);
+
+            if (::aio_read(&cbs_[buffer_index]) != 0) [[unlikely]]
+            {
+                std::cerr << "aio_read failed: " << std::strerror(errno) << std::endl;
+                exit(-1);
+            }
+
+            cbs_active_[buffer_index] = true;
+            scheduled_record_count_ += read_count;
+        }
+
+        void wait_read_finish(const uint32_t buffer_index)
+        {
+            if (!cbs_active_[buffer_index]) [[unlikely]]
+            {
+                return;
+            }
+
+            const aiocb* list[1] = { &cbs_[buffer_index] };
+            while (::aio_error(&cbs_[buffer_index]) == EINPROGRESS)
+            {
+                if (::aio_suspend(list, 1, nullptr) != 0 && errno != EINTR) [[unlikely]]
+                {
+                    std::cerr << "aio_suspend failed" << std::endl;
+                    exit(-1);
+                }
+            }
+
+            const int err = ::aio_error(&cbs_[buffer_index]);
+            if (err != 0) [[unlikely]]
+            {
+                std::cerr << "aio_read error: " << err << std::endl;
+                exit(-1);
+            }
+
+            const ssize_t bytes_read = ::aio_return(&cbs_[buffer_index]);
+            if (bytes_read != static_cast<ssize_t>(cbs_[buffer_index].aio_nbytes)) [[unlikely]]
+            {
+                std::cerr << "partial aio_read" << std::endl;
+                exit(-1);
+            }
+
+            cbs_active_[buffer_index] = false;
+        }
+
+        int fd_ = -1;
+        uint64_t compact_record_size_ = 0;
+
+        uint64_t record_amount_ = 0;
+        uint64_t scheduled_record_count_ = 0;
+        uint64_t delivered_record_count_ = 0;
+        uint32_t current_buffer_index_ = 0;
+        std::array<struct aiocb, 2> cbs_{};
+        std::array<char*, 2> buffers_{};
+        std::array<bool, 2> cbs_active_{};
+        std::array<uint64_t, 2> buffer_record_count_{};
+        std::array<uint64_t, 2> buffer_cursor_{};
+    };
+
+    // Shared by both worker pools below.
+    [[nodiscard]] bool in_range(const uint64_t freq, const uint32_t min_freq, const uint32_t max_freq) noexcept
+    {
+        return freq >= min_freq && freq <= max_freq;
+    }
+
+    [[nodiscard]] size_t histogram_index(const uint64_t freq, const uint32_t min_freq) noexcept
+    {
+        return static_cast<size_t>(freq - min_freq);
+    }
+
+    void merge_histogram(
+        const std::vector<int64_t>& local_histogram,
+        std::vector<std::atomic<int64_t>>& global_histogram)
+    {
+        for (size_t i = 0; i < local_histogram.size(); ++i)
+        {
+            const int64_t value = local_histogram[i];
+            if (value != 0)
+            {
+                global_histogram[i].fetch_add(value, std::memory_order_relaxed);
+            }
+        }
+    }
+
+    // Worker pool for the insert phase: every worker unpacks one compact record
+    // into local variables and inserts it immediately - no second-level queue
+    // and no block-sized array of unpacked records.
+    template <uint32_t N, uint64_t RING_CAPACITY>
+    class CompactInsertThreadPool
+    {
+        static constexpr int SLEEP_THRESHOLD = 128;
+        static constexpr int YIELD_THRESHOLD = 64;
+        static constexpr int MAX_BACKOFF = 256;
+
+    public:
+        CompactInsertThreadPool(
+            SPMCRingMemoryPool<RING_CAPACITY>* pool,
+            FlatConcurrentHashMap<N>* hash_map,
+            std::vector<std::atomic<int64_t>>* global_histogram,
+            const uint32_t worker_count,
+            const uint32_t k_len,
+            const uint32_t count_bytes,
+            const uint32_t min_freq,
+            const uint32_t max_freq,
+            const size_t hist_size)
+            : pool_(pool),
+            hash_map_(hash_map),
+            global_histogram_(global_histogram),
+            worker_count_(worker_count),
+            count_bytes_(count_bytes),
+            full_words_(k_len / BASES_PER_U64T),
+            tail_bytes_((2ULL * (k_len % BASES_PER_U64T) + 7ULL) / 8ULL),
+            kmer_bytes_(full_words_ * sizeof(uint64_t) + tail_bytes_),
+            compact_record_size_(kmer_bytes_ + count_bytes_),
+            min_freq_(min_freq),
+            max_freq_(max_freq),
+            hist_size_(hist_size)
+        {
+        }
+
+        void start()
+        {
+            workers_.reserve(worker_count_);
+            for (uint32_t i = 0; i < worker_count_; ++i)
+            {
+                workers_.emplace_back(&CompactInsertThreadPool::worker_loop, this);
+            }
+        }
+
+        void join()
+        {
+            for (auto& worker : workers_)
+            {
+                if (worker.joinable())
+                {
+                    worker.join();
+                }
+            }
+        }
+
+        [[nodiscard]] bool insert_failed() const noexcept
+        {
+            return insert_failed_.load(std::memory_order_acquire);
+        }
+
+    private:
+        // Restores one compact record into the caller's local key and count. The
+        // words above the k-mer payload are never written here, so the caller
+        // zeroes them once per block.
+        void unpack_record(const char* record, kmer<N>& key, uint32_t& count) const noexcept
+        {
+            const uint64_t full_bytes = full_words_ * sizeof(uint64_t);
+            if (full_bytes > 0)
+            {
+                std::memcpy(key.data.data(), record, static_cast<size_t>(full_bytes));
+            }
+
+            if (tail_bytes_ > 0)
+            {
+                uint64_t tail_data = 0;
+                std::memcpy(
+                    reinterpret_cast<char*>(&tail_data) + (sizeof(uint64_t) - tail_bytes_),
+                    record + full_bytes,
+                    static_cast<size_t>(tail_bytes_));
+                key.data[full_words_] = tail_data;
+            }
+
+            count = 0;
+            std::memcpy(&count, record + kmer_bytes_, static_cast<size_t>(count_bytes_));
+        }
+
+        void worker_loop()
+        {
+            std::vector<int64_t> local_histogram(hist_size_, 0);
+            content_type content{};
+
+            SpinBackoff<MAX_BACKOFF, YIELD_THRESHOLD, SLEEP_THRESHOLD> dequeue_backoff;
+
+            while (true)
+            {
+                if (pool_->consumer_try_dequeue(content))
+                {
+                    dequeue_backoff.decay();
+                    process_block(content, local_histogram);
+                    pool_->consumer_enqueue(content.data);
+                }
+                else if (pool_->producer_finished()) [[unlikely]]
+                {
+                    while (pool_->consumer_try_dequeue(content))
+                    {
+                        process_block(content, local_histogram);
+                        pool_->consumer_enqueue(content.data);
+                    }
+                    break;
+                }
+                else
+                {
+                    dequeue_backoff.backoff();
+                }
+            }
+
+            merge_histogram(local_histogram, *global_histogram_);
+        }
+
+        void process_block(const content_type& content, std::vector<int64_t>& local_histogram)
+        {
+            if (content.length == 0) [[unlikely]]
+            {
+                return;
+            }
+
+            kmer<N> key{};
+            uint32_t count = 0;
+
+            const char* record = content.data;
+            const char* const record_end = record + content.length * compact_record_size_;
+            for (; record < record_end; record += compact_record_size_)
+            {
+                unpack_record(record, key, count);
+
+                const uint64_t merged_count = static_cast<uint64_t>(count) + 1ULL;
+                if (merged_count < min_freq_)
+                {
+                    continue;
+                }
+
+                if (in_range(count, min_freq_, max_freq_)) [[likely]]
+                {
+                    local_histogram[histogram_index(count, min_freq_)] += 1;
+                }
+
+                if (!hash_map_->insert_unique(key, count)) [[unlikely]]
+                {
+                    insert_failed_.store(true, std::memory_order_release);
+                }
+            }
+        }
+
+        SPMCRingMemoryPool<RING_CAPACITY>* pool_ = nullptr;
+        FlatConcurrentHashMap<N>* hash_map_ = nullptr;
+        std::vector<std::atomic<int64_t>>* global_histogram_ = nullptr;
+        uint32_t worker_count_ = 0;
+        uint32_t count_bytes_ = sizeof(uint32_t);
+        uint64_t full_words_ = 0;
+        uint64_t tail_bytes_ = 0;
+        uint64_t kmer_bytes_ = 0;
+        uint64_t compact_record_size_ = 0;
+        uint32_t min_freq_ = 0;
+        uint32_t max_freq_ = 0;
+        size_t hist_size_ = 0;
+        std::vector<std::thread> workers_;
+        std::atomic<bool> insert_failed_{ false };
+    };
+
+    // Approximate phase: same compact blocks, but only the count field is read.
+    template <uint32_t N, uint64_t RING_CAPACITY>
+    class CompactApproximateThreadPool
+    {
+        static constexpr int MAX_SPIN_TIME = 128;
+        static constexpr int MAX_BACKOFF = 256;
+
+    public:
+        CompactApproximateThreadPool(
+            SPMCRingMemoryPool<RING_CAPACITY>* pool,
+            std::vector<std::atomic<int64_t>>* global_histogram,
+            const uint32_t worker_count,
+            const uint32_t k_len,
+            const uint32_t count_bytes,
+            const uint32_t min_freq,
+            const uint32_t max_freq,
+            const size_t hist_size)
+            : pool_(pool),
+            global_histogram_(global_histogram),
+            worker_count_(worker_count),
+            count_bytes_(count_bytes),
+            kmer_bytes_(packed_kmer_bytes_for_k<N>(k_len)),
+            compact_record_size_(kmer_bytes_ + count_bytes),
+            min_freq_(min_freq),
+            max_freq_(max_freq),
+            hist_size_(hist_size)
+        {
+        }
+
+        void start()
+        {
+            workers_.reserve(worker_count_);
+            for (uint32_t i = 0; i < worker_count_; ++i)
+            {
+                workers_.emplace_back(&CompactApproximateThreadPool::worker_loop, this);
+            }
+        }
+
+        void join()
+        {
+            for (auto& worker : workers_)
+            {
+                if (worker.joinable())
+                {
+                    worker.join();
+                }
+            }
+        }
+
+    private:
+        void worker_loop()
+        {
+            std::vector<int64_t> local_histogram(hist_size_, 0);
+            content_type content{};
+
+            int spin_time = 0;
+            int backoff = 2;
+
+            while (true)
+            {
+                if (pool_->consumer_try_dequeue(content))
+                {
+                    process_block(content, local_histogram);
+                    pool_->consumer_enqueue(content.data);
+                }
+                else if (pool_->producer_finished()) [[unlikely]]
+                {
+                    while (pool_->consumer_try_dequeue(content))
+                    {
+                        process_block(content, local_histogram);
+                        pool_->consumer_enqueue(content.data);
+                    }
+                    break;
+                }
+                else
+                {
+                    spin_time++;
+                    if (spin_time > MAX_SPIN_TIME)
+                    {
+                        spin_time = 0;
+                        backoff = 2;
+                        std::this_thread::yield();
+                    }
+                    else
+                    {
+                        for (int i = 0; i < backoff; i++)
+                        {
+                            cpu_relax();
+                        }
+                        backoff = std::min(backoff * 2, MAX_BACKOFF);
+                    }
+                }
+            }
+
+            merge_histogram(local_histogram, *global_histogram_);
+        }
+
+        void process_block(const content_type& content, std::vector<int64_t>& local_histogram)
+        {
+            if (content.length == 0) [[unlikely]]
+            {
+                return;
+            }
+
+            const char* record = content.data;
+            const char* const record_end = record + content.length * compact_record_size_;
+            for (; record < record_end; record += compact_record_size_)
+            {
+                uint32_t count = 0;
+                std::memcpy(&count, record + kmer_bytes_, static_cast<size_t>(count_bytes_));
+                if (in_range(count, min_freq_, max_freq_)) [[likely]]
+                {
+                    local_histogram[histogram_index(count, min_freq_)] += 1;
+                }
+            }
+        }
+
+        SPMCRingMemoryPool<RING_CAPACITY>* pool_ = nullptr;
+        std::vector<std::atomic<int64_t>>* global_histogram_ = nullptr;
+        uint32_t worker_count_ = 0;
+        uint32_t count_bytes_ = sizeof(uint32_t);
+        uint64_t kmer_bytes_ = 0;
+        uint64_t compact_record_size_ = 0;
+        uint32_t min_freq_ = 0;
+        uint32_t max_freq_ = 0;
+        size_t hist_size_ = 0;
+        std::vector<std::thread> workers_;
+    };
+
     template <uint32_t N>
     void enqueue_high_records(
         const std::vector<RootFileInfo>& high_files,
@@ -393,22 +970,26 @@ namespace
         uint32_t count_bytes,
         ProgressPrinter* progress)
     {
-        using Record = ExportRecord<N>;
-        constexpr uint64_t RECORDS_PER_BLOCK = HISTOGRAM_BLOCK_BYTES / sizeof(Record);
-        static_assert(RECORDS_PER_BLOCK > 0, "histogram high-frequency block is too small");
         const uint64_t compact_rec_size = packed_kmer_bytes_for_k<N>(k_len) + count_bytes;
+        const uint64_t records_per_block = HISTOGRAM_BLOCK_BYTES / compact_rec_size;
+        if (records_per_block == 0) [[unlikely]]
+        {
+            std::cerr << "histogram high-frequency block is too small for compact record size "
+                << compact_rec_size << std::endl;
+            exit(-1);
+        }
 
         for (const RootFileInfo& high_file : high_files)
         {
-            FinalDrainReader<N> reader(k_len, count_bytes);
+            CompactRecordReader reader(k_len, count_bytes);
             reader.open(high_file.filename);
 
             while (!reader.finished())
             {
                 char* block_ptr = nullptr;
                 pool.producer_dequeue(block_ptr);
-                auto* records = reinterpret_cast<Record*>(block_ptr);
-                const uint64_t count = reader.read_records(records, RECORDS_PER_BLOCK);
+                // Compact records go through the pool untouched.
+                const uint64_t count = reader.read_compact_records(block_ptr, records_per_block);
                 if (count == 0) [[unlikely]]
                 {
                     pool.consumer_enqueue(block_ptr);
@@ -758,9 +1339,10 @@ namespace
 
         {
             SPMCRingMemoryPool<HISTOGRAM_RING_CAPACITY> high_pool(HISTOGRAM_BLOCK_BYTES, 1);
-            HighFrequencyInsertThreadPool<N, HISTOGRAM_RING_CAPACITY> high_threads(
+            CompactInsertThreadPool<N, HISTOGRAM_RING_CAPACITY> high_threads(
                 &high_pool, &hash_map, &global_histogram,
-                worker_count, options.k_len, options.min_freq, options.max_freq, hist_size);
+                worker_count, options.k_len, options.count_bytes,
+                options.min_freq, options.max_freq, hist_size);
             high_threads.start();
             enqueue_high_records<N>(high_files, high_pool, options.k_len, options.count_bytes, &progress);
             high_threads.join();
@@ -861,11 +1443,12 @@ namespace
 
         {
             SPMCRingMemoryPool<HISTOGRAM_RING_CAPACITY> approximate_pool(HISTOGRAM_BLOCK_BYTES, 1);
-            ApproximateHighFrequencyThreadPool<N, HISTOGRAM_RING_CAPACITY> approximate_threads(
+            CompactApproximateThreadPool<N, HISTOGRAM_RING_CAPACITY> approximate_threads(
                 &approximate_pool,
                 &global_histogram,
                 worker_count,
                 options.k_len,
+                options.count_bytes,
                 options.min_freq,
                 options.max_freq,
                 hist_size);
